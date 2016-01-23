@@ -1,6 +1,7 @@
 [package]
-name = "bounded-allocator"
+authors = ["Josiah Gaskin <josiahgaskin@gmail.com>"]
+name = "lodestone"
 version = "0.1.0"
-authors = ["android"]
 
 [dependencies]
+zero = "0.1.2"
