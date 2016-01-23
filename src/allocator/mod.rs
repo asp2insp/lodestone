@@ -1,10 +1,7 @@
 use std::{mem, slice};
 
 /// An allocator owns a slice of memory
-/// and  can pass out references to sub-slices
-/// it is also capable of moving the allocation to a new location.
-/// There is an unsafe API for clients that take control of the
-/// memory allocated
+/// and  can pass out chunks of it as allocations
 pub struct Allocator {
     buffer: *mut u8,
     len: usize,
@@ -41,7 +38,7 @@ impl Allocator {
 fn linear_alloc_works() {
    let mut buf: [u8; 100] = [0; 100];
    let mut al = Allocator::new(&mut buf[..]);
-   
+
    assert_eq!(100, al.len);
    assert_eq!(0, al.tail);
 
