@@ -1,0 +1,6 @@
+[package]
+name = "bounded-allocator"
+version = "0.1.0"
+authors = ["android"]
+
+[dependencies]
