@@ -104,6 +104,11 @@ impl <T> Pool<T> {
             self.free_list.push_back(index);
         }
     }
+
+    /// Returns the number of live items. O(1) running time.
+    pub fn live_count(&self) -> usize {
+        self.tail.load(Ordering::Relaxed) - self.free_list.len()
+    }
 }
 
 
@@ -112,9 +117,10 @@ impl <T> Pool<T> {
     // Returns an item from the free list, or
     // tries to allocate a new one from the buffer
     fn claim_free_index(&mut self) -> Result<usize, &'static str> {
-        let index = try!(self.free_list.pop_front()
-                .ok_or("")
-                .or(self.push_back_alloc()));
+        let index = match self.free_list.pop_front() {
+            Some(i) => i,
+            None => try!(self.push_back_alloc()),
+        };
         self.retain(index);
         Ok(index)
     }
@@ -169,6 +175,44 @@ impl <T> IndexMut<usize> for Pool<T> {
 }
 
 #[test]
+fn release_frees() {
+       let mut buf: [u8; 100] = [0; 100];
+       let mut p = Pool::<u32>::new(&mut buf[..]);
+       p.alloc().unwrap();
+       p.alloc().unwrap();
+
+       assert_eq!(2, p.live_count());
+
+       p.release(0);
+       assert_eq!(1, p.live_count());
+       assert_eq!(1, p.free_list.len());
+       assert_eq!(0, *p.free_list.front().unwrap());
+
+       p.release(1);
+       assert_eq!(0, p.live_count());
+       assert_eq!(2, p.free_list.len());
+}
+
+#[test]
+fn alloc_after_free_recycles() {
+       let mut buf: [u8; 100] = [0; 100];
+       let mut p = Pool::<u32>::new(&mut buf[..]);
+       p.alloc().unwrap();
+       assert_eq!(1, p.live_count());
+       assert_eq!(1, p.tail.load(Ordering::Relaxed));
+
+       p.release(0);
+       assert_eq!(0, p.live_count());
+       assert_eq!(1, p.free_list.len());
+
+       p.alloc().unwrap();
+       assert_eq!(1, p.tail.load(Ordering::Relaxed)); // Tail shouldn't move
+       assert_eq!(1, p.live_count());
+       assert_eq!(0, p.free_list.len());
+}
+
+
+#[test]
 fn construction() {
    let mut buf: [u8; 100] = [0; 100];
    let mut p = Pool::<u32>::new(&mut buf[..]);
@@ -194,6 +238,8 @@ fn free_list_alloc_works() {
    assert_eq!([1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8][..], buf[0..8]);
    // Check payload
    assert_eq!([42u8, 0u8, 0u8, 0u8][..], buf[8..12]);
+
+   assert_eq!(1, p.live_count());
 }
 
 #[test]
@@ -211,6 +257,7 @@ fn multiple_allocations_work() {
         let int1 = p.alloc().unwrap();
         *int1 = i;
    }
+   assert_eq!(10, p.live_count());
    for i in 0..10 {
        let start = 12*i;
        // Check ref_count
