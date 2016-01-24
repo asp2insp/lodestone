@@ -142,27 +142,6 @@ impl <T> Pool<T> {
             mem::transmute(ptr)
         }
     }
-
-    /// Without free list, try to claim the first re-usable
-    /// item.
-    /// #[deprecated]
-    fn claim_first_free_slot(&mut self) -> usize {
-        let mut i = self.buffer.clone();
-        let mut index = 0;
-        while index < self.capacity {
-            unsafe {
-                let header: *mut SlotHeader = mem::transmute(i);
-                if (*header).ref_count
-                    .compare_and_swap(0, 1, Ordering::Relaxed) == 0 {
-                    break
-                }
-                // Otherwise, look for the next one
-                i = i.offset(self.slot_size as isize);
-                index += 1;
-            }
-        }
-        index
-    }
 }
 
 impl <T> Index<usize> for Pool<T> {
