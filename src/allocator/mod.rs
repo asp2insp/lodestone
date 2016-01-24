@@ -2,6 +2,7 @@ use std::{mem, slice};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::ops::{Index, IndexMut};
 use std::marker::PhantomData;
+use std::collections::LinkedList;
 
 
 /// A pool represents a fixed number of ref-counted objects.
@@ -18,9 +19,13 @@ pub struct Pool<T> {
     buffer_size: usize,
     capacity: usize,
 
+    tail: AtomicUsize, // One past the end index
+
     // Cached values
     slot_size: usize,
     header_size: usize,
+
+    free_list: LinkedList<usize>,
 }
 
 struct SlotHeader {
@@ -37,9 +42,11 @@ impl <T> Pool<T> {
             item_type: PhantomData,
             buffer: ptr,
             buffer_size: mem.len(),
+            tail: AtomicUsize::new(0),
             slot_size: slot_size,
             capacity: mem.len() / slot_size,
             header_size: header_size,
+            free_list: LinkedList::new(),
         }
     }
 
@@ -57,11 +64,44 @@ impl <T> Pool<T> {
     /// Try to allocate a new item from the pool.
     /// A mutable reference to the item is returned on success
     pub fn alloc(&mut self) -> Result<&mut T, &'static str> {
-        let index = self.claim_first_free_slot();
-        if index >= self.capacity {
-            Err("OOM")
-        } else {
-            Ok(&mut self[index])
+        let index = try!(self.claim_free_index());
+        Ok(&mut self[index])
+    }
+
+    // Increase the ref count for the cell at the given index
+    pub fn retain(&mut self, index: usize) {
+        let h = self.header_for(index);
+        loop {
+            let old = h.ref_count.load(Ordering::Relaxed);
+            let swap = h.ref_count
+                .compare_and_swap(old, old+1, Ordering::Relaxed);
+            if swap == old {
+                break
+            }
+        }
+    }
+
+    // Decrease the ref count for the cell at the given index
+    pub fn release(&mut self, index: usize) {
+        let mut is_free = false;
+        { // Make the borrow checker happy
+            let h = self.header_for(index);
+            loop {
+                let old = h.ref_count.load(Ordering::Relaxed);
+                assert!(old > 0, "Release called on [{}] which has no refs!", index);
+
+                let swap = h.ref_count
+                    .compare_and_swap(old, old-1, Ordering::Relaxed);
+                if swap == old {
+                    if old == 1 { // this was the last reference
+                        is_free = true;
+                    }
+                    break
+                }
+            }
+        }
+        if is_free {
+            self.free_list.push_back(index);
         }
     }
 }
@@ -69,6 +109,43 @@ impl <T> Pool<T> {
 
 /// Internal Functions
 impl <T> Pool<T> {
+    // Returns an item from the free list, or
+    // tries to allocate a new one from the buffer
+    fn claim_free_index(&mut self) -> Result<usize, &'static str> {
+        let index = try!(self.free_list.pop_front()
+                .ok_or("")
+                .or(self.push_back_alloc()));
+        self.retain(index);
+        Ok(index)
+    }
+
+    // Pushes the end of the used space in the buffer back
+    // returns the previous index
+    fn push_back_alloc(&mut self) -> Result<usize, &'static str> {
+        loop {
+            let old_tail = self.tail.load(Ordering::Relaxed);
+            let swap = self.tail.compare_and_swap(old_tail, old_tail+1, Ordering::Relaxed);
+            // If we were the ones to claim this slot, or
+            // we've overrun the buffer, return
+            if old_tail >= self.capacity {
+                return Err("OOM")
+            } else if swap == old_tail {
+                return Ok(old_tail)
+            }
+        }
+    }
+
+    fn header_for<'a>(&'a mut self, i: usize) -> &'a mut SlotHeader {
+        unsafe {
+            let ptr = self.buffer.clone()
+                .offset((i * self.slot_size) as isize);
+            mem::transmute(ptr)
+        }
+    }
+
+    /// Without free list, try to claim the first re-usable
+    /// item.
+    /// #[deprecated]
     fn claim_first_free_slot(&mut self) -> usize {
         let mut i = self.buffer.clone();
         let mut index = 0;
