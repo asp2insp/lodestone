@@ -4,6 +4,8 @@ use std::ops::{Index, IndexMut};
 use std::marker::PhantomData;
 use std::collections::LinkedList;
 use std::ops::{Deref, DerefMut};
+use std::ptr;
+
 
 pub mod tests;
 
@@ -11,6 +13,8 @@ pub mod tests;
 /// the pool. It is returned by alloc, and will automatically
 /// release/retain when dropped/cloned. It implements Deref/DerefMut,
 /// so all accesses can go through it.
+/// WARNING! Taking the address of the dereferenced value constitutes
+/// undefined behavior. So, given a: Arc<T>, &*a is not allowed
 pub struct Arc<T> {
     pool: *mut Pool<T>,
     index: usize,
@@ -18,10 +22,18 @@ pub struct Arc<T> {
 
 /// Public functions
 impl <T> Arc<T> {
+    /// If you want to manually manage the memory or
+    /// use the wrapped reference outside of the Arc system
+    /// retain/release provide an escape hatch.
+    /// Retain will increment the reference count
     pub unsafe fn retain(&mut self) {
         self.get_pool().retain(self.index);
     }
 
+    /// If you want to manually manage the memory or
+    /// use the wrapped reference outside of the Arc system
+    /// retain/release provide an escape hatch.
+    /// Release will decrement the reference count
     pub unsafe fn release(&mut self) {
         self.get_pool().release(self.index);
     }
@@ -29,6 +41,11 @@ impl <T> Arc<T> {
 
 /// Internal functions
 impl <T> Arc<T> {
+
+    /// It's somewhat confusing that Arc::new()
+    /// does not take care of bumping the ref count.
+    /// However, the atomic op for claiming a free slot
+    /// needs to happen before the new() takes place
     fn new(index: usize, p: &Pool<T>) -> Arc<T> {
         Arc {
             pool: unsafe { mem::transmute(p) },
@@ -151,6 +168,18 @@ impl <T> Pool<T> {
         }
     }
 
+    /// Fast copy a slot's contents to a new slot and return
+    /// a pointer to the new slot
+    pub fn alloc_with_contents_of(&mut self, other: &Arc<T>) -> Result<Arc<T>, &'static str> {
+        let index = try!(self.claim_free_index());
+        unsafe {
+            let from = self.raw_contents_for(other.index);
+            let to = self.raw_contents_for(index);
+            ptr::copy(from, to, mem::size_of::<T>());
+        }
+        Ok(Arc::new(index, self))
+    }
+
     /// Try to allocate a new item from the pool.
     /// A mutable reference to the item is returned on success
     pub fn alloc(&mut self) -> Result<Arc<T>, &'static str> {
@@ -240,8 +269,16 @@ impl <T> Pool<T> {
     fn header_for<'a>(&'a mut self, i: usize) -> &'a mut SlotHeader {
         unsafe {
             let ptr = self.buffer.clone()
-            .offset((i * self.slot_size) as isize);
+                .offset((i * self.slot_size) as isize);
             mem::transmute(ptr)
+        }
+    }
+
+    fn raw_contents_for<'a>(&'a mut self, i: usize) -> *mut u8 {
+        unsafe {
+            self.buffer.clone()
+                .offset((i * self.slot_size) as isize)
+                .offset(self.header_size as isize)
         }
     }
 }
@@ -252,8 +289,8 @@ impl <T> Index<usize> for Pool<T> {
     fn index<'a>(&'a self, i: usize) -> &'a T {
         unsafe {
             let ptr = self.buffer.clone()
-            .offset((i * self.slot_size) as isize)
-            .offset(self.header_size as isize);
+                .offset((i * self.slot_size) as isize)
+                .offset(self.header_size as isize);
             mem::transmute(ptr)
         }
     }
@@ -263,8 +300,8 @@ impl <T> IndexMut<usize> for Pool<T> {
     fn index_mut<'a>(&'a mut self, i: usize) -> &'a mut T {
         unsafe {
             let ptr = self.buffer.clone()
-            .offset((i * self.slot_size) as isize)
-            .offset(self.header_size as isize);
+                .offset((i * self.slot_size) as isize)
+                .offset(self.header_size as isize);
             mem::transmute(ptr)
         }
     }

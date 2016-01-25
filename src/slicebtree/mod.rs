@@ -6,6 +6,7 @@
 
 use std::mem;
 use self::NodeType::*;
+use allocator::*;
 
 pub struct Options {
     num_heads: usize,
@@ -38,6 +39,10 @@ pub struct BTree<'a> {
 
 /// Public API
 impl <'a> BTree<'a> {
+    pub fn new() {
+
+    }
+
     pub fn open() {
 
     }
