@@ -4,9 +4,6 @@
 
 use std::mem;
 use self::NodeType::*;
-use zero::{read, Pod};
-
-pub const MAGIC_ID: u32 = 0x1D_2D_3D_4D;
 
 pub struct Options {
     num_heads: Option<usize>,
@@ -52,8 +49,6 @@ struct Metadata {
     b: usize,
 }
 
-unsafe impl Pod for Metadata {}
-
 /// Public API
 impl <'a> BTree<'a> {
     pub fn open() {
@@ -64,16 +59,4 @@ impl <'a> BTree<'a> {
 /// Internal Functions
 impl <'a> BTree<'a> {
 
-}
-
-/// Get stats from the metadata page
-fn get_metadata<'a>(buffer: &'a [u8]) -> Result<&'a Metadata, &'static str> {
-    if buffer.len() < mem::size_of::<Metadata>() {
-        return Err("Memory block is too small")
-    }
-    let meta: &Metadata = read::<Metadata>(buffer);
-    if meta.magic != MAGIC_ID {
-        return Err("This data does not represent a valid SliceBTree")
-    }
-    Ok(meta)
 }
