@@ -153,7 +153,7 @@ impl <T> Pool<T> {
     /// Try to allocate a new item from the pool.
     /// A mutable reference to the item is returned on success
     pub fn alloc(&mut self) -> Result<Arc<T>, &'static str> {
-        let index = try!(self.claim_free_index());
+        let index = try!(self.internal_alloc());
         Ok(Arc::new(index, self))
     }
 
@@ -214,6 +214,12 @@ impl <T> Pool<T> {
         Ok(index)
     }
 
+    // Internal alloc that does not create an Arc but still claims a slot
+    fn internal_alloc(&mut self) -> Result<usize, &'static str> {
+        let index = try!(self.claim_free_index());
+        Ok(index)
+    }
+
     // Pushes the end of the used space in the buffer back
     // returns the previous index
     fn push_back_alloc(&mut self) -> Result<usize, &'static str> {
@@ -267,8 +273,11 @@ impl <T> IndexMut<usize> for Pool<T> {
 fn release_frees() {
        let mut buf: [u8; 100] = [0; 100];
        let mut p = Pool::<u32>::new(&mut buf[..]);
-       p.alloc().unwrap();
-       p.alloc().unwrap();
+
+       // Use internal_alloc so that the Arc doesn't drop
+       // the reference immediately
+       assert!(p.internal_alloc().is_ok());
+       assert!(p.internal_alloc().is_ok());
 
        assert_eq!(2, p.live_count());
 
@@ -286,7 +295,7 @@ fn release_frees() {
 fn alloc_after_free_recycles() {
        let mut buf: [u8; 100] = [0; 100];
        let mut p = Pool::<u32>::new(&mut buf[..]);
-       p.alloc().unwrap();
+       assert!(p.internal_alloc().is_ok());
        assert_eq!(1, p.live_count());
        assert_eq!(1, p.tail.load(Ordering::Relaxed));
 
@@ -294,7 +303,7 @@ fn alloc_after_free_recycles() {
        assert_eq!(0, p.live_count());
        assert_eq!(1, p.free_list.len());
 
-       p.alloc().unwrap();
+       assert!(p.internal_alloc().is_ok());
        assert_eq!(1, p.tail.load(Ordering::Relaxed)); // Tail shouldn't move
        assert_eq!(1, p.live_count());
        assert_eq!(0, p.free_list.len());
