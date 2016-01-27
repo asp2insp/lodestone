@@ -16,8 +16,11 @@ class BTree:
         return unicode(self.root)
 
 class Node:
+    id = 0
     def __init__(self):
         # self.keys = []
+        self.id = Node.id
+        Node.id += 1
         self.values = []
         self.children = []
 
@@ -25,26 +28,35 @@ class Node:
         sub = ",\n{}".format(' '*depth*2).join(
             map(lambda x: x.to_string(depth+1), self.children))
         nl = "\n" if self.children else ""
-        return "{0}V:{1}, C:[\n{0}{2}{3}{0}]".format(
-            ' '*depth*2, self.values, sub, nl)
+        return "{0}({4}) V:{1}, C:[\n{0}{2}{3}{0}]".format(
+            ' '*depth*2, self.values, sub, nl, self.id)
 
     def __unicode__(self):
         return self.to_string()
 
+    def is_leaf(self):
+        return len(self.children) == 0
+
     def insert(self, key=None, value=None):
         # -> mid, Node
         mid, sib = (None, None)
-        if len(self.values) <= MAX_CHILDREN or (self.values[0] <= value <= self.values[-1]):
+        if self.is_leaf():
             self._insert_inner(key, value)
             if len(self.values) > MAX_CHILDREN:
                 return self._split()
         else:
             for i in xrange(len(self.values)):
-                if self.values[i] > value:
+                if value < self.values[i] or i == len(self.values)-1:
                     mid, sib = self.children[i].insert(value=value)
                     if mid:
                         self._insert_child(mid, sib)
-                        return self.insert(value=mid)
+                        self._insert_inner(value=mid)
+                        if len(self.values) > MAX_CHILDREN:
+                            return self._split()
+                    #     else:
+                    #         return None, None
+                    # else:
+                    #     return None, None
         return None, None
 
     def _insert_child(self, key, node):
@@ -82,14 +94,11 @@ class Node:
 
 if __name__ == "__main__":
     bt = BTree()
-    bt.insert(value=3)
 
-    bt.insert(value=5)
-
-    # import pdb; pdb.set_trace()
-    bt.insert(value=4)
-
-    print unicode(bt)
+    while True:
+        v = int(raw_input("insert> "))
+        bt.insert(value=v)
+        print unicode(bt)
 
     # # Root
     # r = Node()
