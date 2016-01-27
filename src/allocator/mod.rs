@@ -1,5 +1,4 @@
-use std::{mem, slice, fmt};
-use std::cell::UnsafeCell;
+use std::{mem, fmt};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::ops::{Index, IndexMut};
 use std::marker::PhantomData;

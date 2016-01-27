@@ -1,19 +1,21 @@
 /// N-headed, Copy-on-Write B+Tree map
 /// Supports MVCC up to N revisions
-/// Lives entirely within the slice that is given to it
+/// Lives entirely within the slice that is given to it.
+/// Keys and Values are byte slices. There is no max
+/// size for keys or values.
 
 use std::mem;
 use self::NodeType::*;
 
 pub struct Options {
-    num_heads: Option<usize>,
-    b: Option<usize>,
+    num_heads: usize,
+    b: usize,
 }
 
-pub fn Defaults() -> Options {
+pub fn defaults() -> Options {
     Options {
-        num_heads: Some(2),
-        b: Some(100),
+        num_heads: 2,
+        b: 100,
     }
 }
 
@@ -34,21 +36,6 @@ pub struct BTree<'a> {
     current_root: &'a NodeHeader,
 }
 
-#[repr(C)]
-struct NodeHeader {
-    node_type: NodeType,
-    tx_id: u64,
-    data_offset_start: u64,
-    data_offset_end: u64,
-}
-
-#[repr(C)]
-struct Metadata {
-    magic: u32,
-    num_heads: usize,
-    b: usize,
-}
-
 /// Public API
 impl <'a> BTree<'a> {
     pub fn open() {
@@ -60,3 +47,20 @@ impl <'a> BTree<'a> {
 impl <'a> BTree<'a> {
 
 }
+
+/// The structure of a tree is a series of Nodes.
+/// Each node is made up of at least 1 page.
+/// The first page is interpreted as a NodeHeader + data
+/// subsequent pages are interpreted as data based on the
+/// NodeType defined by the header.
+#[repr(C, packed)]
+struct NodeHeader {
+    node_type: NodeType,
+    tx_id: u64,
+    data_offset_start: u64,
+    data_offset_end: u64,
+}
+
+
+/// Each page is 64Kb
+type Page = [u8; 0x10000];
