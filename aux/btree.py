@@ -37,6 +37,16 @@ class Node:
     def is_leaf(self):
         return len(self.children) == 0
 
+    def _find_child_for(self, value):
+      for i in xrange(len(self.values)):
+        if value < self.values[i]:
+          return self.children[i]
+        elif i == len(self.values)-1:
+          return self.children[-1]
+        elif self.values[i+1] > value:
+          return self.children[i+1]
+
+
     def insert(self, key=None, value=None):
         # -> mid, Node
         mid, sib = (None, None)
@@ -46,15 +56,13 @@ class Node:
               print "SPLIT ({})\n{}\n".format(self.id, unicode(_T))
               return self._split()
         else:
-          for i in xrange(len(self.values)):
-            if value > self.values[i] and (i == len(self.values)-1 or value<self.values[i+1]):
-              mid, sib = self.children[i+1].insert(value=value)
-              if mid:
-                  self._insert_non_full(value=mid)
-                  self._insert_child(mid, sib)
-                  if len(self.values) > MAX_CHILDREN:
-                    print "SPLIT_PROPAGATE ({})\n{}\n".format(self.id, unicode(_T))
-                    return self._split()
+          mid, sib = self._find_child_for(value).insert(value=value)
+          if mid:
+              self._insert_non_full(value=mid)
+              self._insert_child(mid, sib)
+              if len(self.values) > MAX_CHILDREN:
+                print "SPLIT_PROPAGATE ({})\n{}\n".format(self.id, unicode(_T))
+                return self._split()
         return None, None
 
     def _insert_child(self, key, node):
