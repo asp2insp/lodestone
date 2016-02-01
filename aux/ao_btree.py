@@ -125,6 +125,12 @@ class Node:
 _T = BTree()
 if __name__ == "__main__":
     while True:
-        v = int(raw_input("insert> "))
-        _T.insert(value=v)
-        print unicode(_T)
+        cmd = raw_input("insert|cmd> ")
+        if cmd == "history":
+          for t in HISTORY:
+            print "HIST: {}".format(unicode(t))
+          print "HIST: {}".format(unicode(_T))
+        else:
+          v = int(cmd)
+          _T.insert(v)
+          print unicode(_T)
