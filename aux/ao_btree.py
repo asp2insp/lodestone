@@ -125,7 +125,11 @@ class Node:
 _T = BTree()
 if __name__ == "__main__":
     while True:
-        cmd = raw_input("insert|cmd> ")
+        try:
+          cmd = raw_input("insert|cmd> ")
+        except EOFError:
+          print "quitting..."
+          break
         if cmd == "history":
           for t in HISTORY:
             print "HIST: {}".format(unicode(t))
