@@ -9,14 +9,21 @@ use std::ptr;
 
 pub mod tests;
 
+/// SUPER SUPER UNSAFE
+/// TODO: help this out somehow. We need the raw pointer
+/// since we need to be generic over Pool<T>
+static POOLS: Vec<(usize, *mut u8)> = vec![];
+
 /// Arc is the only valid way to access an item in
 /// the pool. It is returned by alloc, and will automatically
 /// release/retain when dropped/cloned. It implements Deref/DerefMut,
 /// so all accesses can go through it.
 /// WARNING! Taking the address of the dereferenced value constitutes
 /// undefined behavior. So, given a: Arc<T>, &*a is not allowed
+#[repr(C)]
 pub struct Arc<T> {
-    pool: *mut Pool<T>,
+    item_type: PhantomData<T>,
+    pool_id: usize,
     index: usize,
 }
 
@@ -48,14 +55,22 @@ impl <T> Arc<T> {
     /// needs to happen before the new() takes place
     fn new(index: usize, p: &Pool<T>) -> Arc<T> {
         Arc {
-            pool: unsafe { mem::transmute(p) },
+            item_type: PhantomData,
+
+            pool_id: p.id,
             index: index,
         }
     }
 
     fn get_pool(&self) -> &mut Pool<T> {
+        let raw_ptr = POOLS.iter().find(|entry| {
+            entry.0 == self.pool_id
+        })
+        .unwrap()
+        .1;
         unsafe {
-            &mut *self.pool
+            let pool: *mut Pool<T> = mem::transmute(raw_ptr);
+            &mut *pool
         }
     }
 
@@ -74,7 +89,9 @@ impl <T> Clone for Arc<T> {
     fn clone(&self) -> Self {
         self.get_pool().retain(self.index);
         Arc {
-            pool: self.pool,
+            item_type: self.item_type,
+
+            pool_id: self.pool_id,
             index: self.index,
         }
     }
@@ -102,13 +119,7 @@ impl <T> fmt::Debug for Arc<T> {
 
 impl <T> PartialEq for Arc<T> {
     fn eq(&self, other: &Arc<T>) -> bool {
-        if self.index != other.index {
-            false
-        } else {
-            unsafe {
-                self.pool as *const _ == other.pool as *const _
-            }
-        }
+        self.index == other.index && self.pool_id == other.pool_id
     }
 }
 
@@ -121,6 +132,8 @@ impl <T> PartialEq for Arc<T> {
 ///
 pub struct Pool<T> {
     item_type: PhantomData<T>,
+
+    id: usize,
 
     buffer: *mut u8,
     buffer_size: usize,
@@ -141,12 +154,13 @@ struct SlotHeader {
 
 /// Public interface
 impl <T> Pool<T> {
-    pub fn new(mem: &mut [u8]) -> Pool<T> {
+    pub fn new(mem: &mut [u8], id: usize) -> Pool<T> {
         let ptr: *mut u8 = mem.as_mut_ptr();
         let header_size = mem::size_of::<SlotHeader>();
         let slot_size = mem::size_of::<T>() + header_size;
         Pool {
             item_type: PhantomData,
+            id: id,
             buffer: ptr,
             buffer_size: mem.len(),
             tail: AtomicUsize::new(0),

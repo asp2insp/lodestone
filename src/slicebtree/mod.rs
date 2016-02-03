@@ -50,36 +50,51 @@ impl <'a> BTree<'a> {
 /// The first page is interpreted as a NodeHeader + data
 /// subsequent pages are interpreted as data based on the
 /// NodeType defined by the header.
-#[repr(C, packed)]
+#[repr(C)]
 struct NodeHeader {
     node_type: NodeType,
     tx_id: u64,
-    data_offset_start: u64,
-    data_offset_end: u64,
+    keys: [EntryLocation; B],
+    children: [EntryLocation; B],
 }
 
-#[repr(C, packed)]
-struct LeafNodeData {
-    keys_data: [Arc<Page>; B],
-    values_data: [Arc<Page>; B],
+struct EntryLocation {
+    offset: usize,
 }
 
-#[repr(C, packed)]
-struct InternalNodeData {
-    keys_data: [Arc<Page>; B],
-    children_data: [Arc<Page>; B],
-}
+// ##Node
+// * NodeHeader
+// * Node metadata
+//
+// ##NodeHeader
+// * enumerated node type u8
+// * transaction id usize
+// * data offset start usize
+// * data offset end usize
+//
+// ##Node Metadata (Internal or Root)
+// * keys  [BSL; B]
+// * children [BSL; B]
+//
+// ##Node Metadata (Leaf)
+// * keys  [BSL; B]
+// * values [BSL; B]
+//
+//
+// ##Byte String Location
+// * Arc<Page> usize
+// * offset usize
+//
+// ##Byte String Entry Alias
+// * enumerated entry type u8
+// * num segments
+// * segments {num segments}
+//     * BSL
+//
+// ##Byte String Entry
+// * enumerated entry type u8
+// * size usize
 
-#[repr(C, packed)]
-struct RootNodeData {
-    keys_data: [Arc<Page>; B],
-    children_data: [Arc<Page>; B],
-}
-
-#[repr(C, packed)]
-struct KeyPage {
-
-}
 
 /// Each page is 4096 bytes
 type Page = [u8; 0x1000];
