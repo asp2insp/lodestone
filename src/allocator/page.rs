@@ -45,3 +45,22 @@ fn test_transmute_whole() {
     assert_eq!([239, 255, 255, 255, 255, 255, 255, 255][..], p[0..8]);
     assert_eq!([56, 0, 0, 0, 0, 0, 0, 0][..], p[8..16]);
 }
+
+#[test]
+fn test_transmute_part() {
+    #[repr(C)]
+    struct Composite {
+        signed: isize,
+        unsigned: usize,
+    }
+
+    let mut p = [0u8; 0x1000];
+    {
+        let c = p.transmute_segment::<Composite>(64);
+        c.signed = -17;
+        c.unsigned = 56;
+    }
+
+    assert_eq!([239, 255, 255, 255, 255, 255, 255, 255][..], p[64..72]);
+    assert_eq!([56, 0, 0, 0, 0, 0, 0, 0][..], p[72..80]);
+}

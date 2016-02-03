@@ -8,7 +8,6 @@ use self::NodeType::*;
 use allocator::*;
 
 
-
 pub const N: usize = 2;
 pub const B: usize = 100;
 
@@ -56,15 +55,15 @@ impl <'a> BTree<'a> {
 #[repr(C)]
 struct NodeHeader {
     node_type: NodeType,
-    tx_id: u64,
+    tx_id: usize,
     keys: [EntryLocation; B],
     children: [EntryLocation; B],
 }
 
 impl NodeHeader {
-    // fn new_in(p: &mut Page) -> &NodeHeader {
-    //
-    // }
+    fn new_in_page(p: &mut Page) -> &NodeHeader {
+        p.transmute_page::<NodeHeader>()
+    }
 }
 
 #[repr(C)]
