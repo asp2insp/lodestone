@@ -94,7 +94,3 @@ struct EntryLocation {
 // ##Byte String Entry
 // * enumerated entry type u8
 // * size usize
-
-
-/// Each page is 4096 bytes
-type Page = [u8; 0x1000];

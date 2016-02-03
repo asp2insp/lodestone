@@ -4,8 +4,8 @@ use std::sync::atomic::{Ordering};
 
 #[test]
 fn release_frees() {
-       let mut buf: [u8; 100] = [0; 100];
-       let mut p = Pool::<u32>::new(&mut buf[..]);
+       let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
+       let mut p = Pool::new(&mut buf[..]);
 
        // Use internal_alloc so that the Arc doesn't drop
        // the reference immediately
@@ -26,7 +26,7 @@ fn release_frees() {
 
 #[test]
 fn alloc_after_free_recycles() {
-       let mut buf: [u8; 100] = [0; 100];
+       let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
        let mut p = Pool::<u32>::new(&mut buf[..]);
        assert!(p.internal_alloc().is_ok());
        assert_eq!(1, p.live_count());
@@ -44,7 +44,7 @@ fn alloc_after_free_recycles() {
 
 #[test]
 fn arc_clone() {
-    let mut buf: [u8; 100] = [0; 100];
+    let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
     let mut p = Pool::<u32>::new(&mut buf[..]);
     {
         let mut int1:Arc<u32> = p.alloc().unwrap();
@@ -67,7 +67,7 @@ fn arc_clone() {
 
 #[test]
 fn arc_drop() {
-    let mut buf: [u8; 100] = [0; 100];
+    let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
     let mut p = Pool::<u32>::new(&mut buf[..]);
     {
         let mut int1:Arc<u32> = p.alloc().unwrap();
@@ -89,22 +89,22 @@ fn arc_drop() {
 
 #[test]
 fn construction() {
-    let mut buf: [u8; 100] = [0; 100];
-    let mut p = Pool::<u32>::new(&mut buf[..]);
+    let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
+    let mut p = Pool::new(&mut buf[..]);
 
-    assert_eq!(100, p.buffer_size);
+    assert_eq!(5*0x1000, p.buffer_size);
     assert_eq!(mem::size_of::<usize>(), p.header_size);
 
     let expected_size = mem::size_of::<usize>() + mem::size_of::<u32>();
     assert_eq!(expected_size, p.slot_size);
-    assert_eq!(100/expected_size, p.capacity); // expected_size should be 8+4=12
+    assert_eq!(5*0x1000/expected_size, p.capacity); // expected_size should be 8+4=12
     assert_eq!(8, p.capacity);
 }
 
 #[test]
 fn free_list_alloc_works() {
-    let mut buf: [u8; 100] = [0; 100];
-    let mut p = Pool::<u32>::new(&mut buf[..]);
+    let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
+    let mut p = Pool::new(&mut buf[..]);
     {
         let mut int1:Arc<u32> = p.alloc().unwrap();
         *int1 = 42;
@@ -127,8 +127,8 @@ fn check_oom_error() {
 
 #[test]
 fn multiple_allocations_work() {
-    let mut buf: [u8; 120] = [0; 120];
-    let mut p = Pool::<u32>::new(&mut buf[..]);
+    let mut buf: [u8; 12*0x1000] = [0; 12*0x1000];
+    let mut p = Pool::new(&mut buf[..]);
     for i in 0..10 {
         let mut int1 = p.alloc().unwrap();
         *int1 = i;

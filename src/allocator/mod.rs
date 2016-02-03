@@ -9,26 +9,25 @@ use std::ptr;
 
 pub mod tests;
 
-/// SUPER SUPER UNSAFE
-/// TODO: help this out somehow. We need the raw pointer
-/// since we need to be generic over Pool<T>
-static POOLS: Vec<(usize, *mut u8)> = vec![];
+static POOLS: Vec<(usize, Pool)> = vec![];
+
+/// Each page is 4096 bytes
+pub type Page = [u8; 0x1000];
 
 /// Arc is the only valid way to access an item in
 /// the pool. It is returned by alloc, and will automatically
 /// release/retain when dropped/cloned. It implements Deref/DerefMut,
 /// so all accesses can go through it.
 /// WARNING! Taking the address of the dereferenced value constitutes
-/// undefined behavior. So, given a: Arc<T>, &*a is not allowed
+/// undefined behavior. So, given a: Arc, &*a is not allowed
 #[repr(C)]
-pub struct Arc<T> {
-    item_type: PhantomData<T>,
+pub struct Arc {
     pool_id: usize,
     index: usize,
 }
 
 /// Public functions
-impl <T> Arc<T> {
+impl Arc {
     /// If you want to manually manage the memory or
     /// use the wrapped reference outside of the Arc system
     /// the retain/release functions provide an escape hatch.
@@ -47,13 +46,13 @@ impl <T> Arc<T> {
 }
 
 /// Internal functions
-impl <T> Arc<T> {
+impl Arc {
 
     /// It's somewhat confusing that Arc::new()
     /// does not take care of bumping the ref count.
     /// However, the atomic op for claiming a free slot
     /// needs to happen before the new() takes place
-    fn new(index: usize, p: &Pool<T>) -> Arc<T> {
+    fn new(index: usize, p: &Pool) -> Arc {
         Arc {
             item_type: PhantomData,
 
@@ -62,14 +61,14 @@ impl <T> Arc<T> {
         }
     }
 
-    fn get_pool(&self) -> &mut Pool<T> {
+    fn get_pool(&self) -> &mut Pool {
         let raw_ptr = POOLS.iter().find(|entry| {
             entry.0 == self.pool_id
         })
         .unwrap()
         .1;
         unsafe {
-            let pool: *mut Pool<T> = mem::transmute(raw_ptr);
+            let pool: *mut Pool = mem::transmute(raw_ptr);
             &mut *pool
         }
     }
@@ -79,13 +78,13 @@ impl <T> Arc<T> {
     }
 }
 
-impl <T> Drop for Arc<T> {
+impl Drop for Arc {
     fn drop(&mut self) {
         self.get_pool().release(self.index);
     }
 }
 
-impl <T> Clone for Arc<T> {
+impl Clone for Arc {
     fn clone(&self) -> Self {
         self.get_pool().retain(self.index);
         Arc {
@@ -97,28 +96,28 @@ impl <T> Clone for Arc<T> {
     }
 }
 
-impl<T> Deref for Arc<T> {
-    type Target = T;
+impl Deref for Arc {
+    type Target = Page;
 
-    fn deref<'b>(&'b self) -> &'b T {
+    fn deref<'b>(&'b self) -> &'b Page {
         &self.get_pool()[self.index]
     }
 }
 
-impl<T> DerefMut for Arc<T> {
-    fn deref_mut<'b>(&'b mut self) -> &'b mut T {
+impl DerefMut for Arc {
+    fn deref_mut<'b>(&'b mut self) -> &'b mut Page {
         &mut self.get_pool()[self.index]
     }
 }
 
-impl <T> fmt::Debug for Arc<T> {
+impl  fmt::Debug for Arc {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Arc{{ offset: {:?}, ref_count: {:?} }}", self.index, self.ref_count())
     }
 }
 
-impl <T> PartialEq for Arc<T> {
-    fn eq(&self, other: &Arc<T>) -> bool {
+impl  PartialEq for Arc {
+    fn eq(&self, other: &Arc) -> bool {
         self.index == other.index && self.pool_id == other.pool_id
     }
 }
@@ -130,9 +129,7 @@ impl <T> PartialEq for Arc<T> {
 /// * V1
 ///   - [0..2] ref_count: u16
 ///
-pub struct Pool<T> {
-    item_type: PhantomData<T>,
-
+pub struct Pool {
     id: usize,
 
     buffer: *mut u8,
@@ -153,11 +150,11 @@ struct SlotHeader {
 }
 
 /// Public interface
-impl <T> Pool<T> {
-    pub fn new(mem: &mut [u8], id: usize) -> Pool<T> {
+impl  Pool {
+    pub fn new(mem: &mut [u8], id: usize) -> Pool {
         let ptr: *mut u8 = mem.as_mut_ptr();
         let header_size = mem::size_of::<SlotHeader>();
-        let slot_size = mem::size_of::<T>() + header_size;
+        let slot_size = mem::size_of::<Page>() + header_size;
         Pool {
             item_type: PhantomData,
             id: id,
@@ -184,19 +181,19 @@ impl <T> Pool<T> {
 
     /// Fast copy a slot's contents to a new slot and return
     /// a pointer to the new slot
-    pub fn alloc_with_contents_of(&mut self, other: &Arc<T>) -> Result<Arc<T>, &'static str> {
+    pub fn alloc_with_contents_of(&mut self, other: &Arc) -> Result<Arc, &'static str> {
         let index = try!(self.claim_free_index());
         unsafe {
             let from = self.raw_contents_for(other.index);
             let to = self.raw_contents_for(index);
-            ptr::copy(from, to, mem::size_of::<T>());
+            ptr::copy(from, to, mem::size_of::<Page>());
         }
         Ok(Arc::new(index, self))
     }
 
     /// Try to allocate a new item from the pool.
     /// A mutable reference to the item is returned on success
-    pub fn alloc(&mut self) -> Result<Arc<T>, &'static str> {
+    pub fn alloc(&mut self) -> Result<Arc, &'static str> {
         let index = try!(self.internal_alloc());
         Ok(Arc::new(index, self))
     }
@@ -246,7 +243,7 @@ impl <T> Pool<T> {
 
 
 /// Internal Functions
-impl <T> Pool<T> {
+impl  Pool {
     // Returns an item from the free list, or
     // tries to allocate a new one from the buffer
     fn claim_free_index(&mut self) -> Result<usize, &'static str> {
@@ -297,10 +294,10 @@ impl <T> Pool<T> {
     }
 }
 
-impl <T> Index<usize> for Pool<T> {
-    type Output = T;
+impl  Index<usize> for Pool {
+    type Output = Page;
 
-    fn index<'a>(&'a self, i: usize) -> &'a T {
+    fn index<'a>(&'a self, i: usize) -> &'a Page {
         unsafe {
             let ptr = self.buffer.clone()
                 .offset((i * self.slot_size) as isize)
@@ -310,8 +307,8 @@ impl <T> Index<usize> for Pool<T> {
     }
 }
 
-impl <T> IndexMut<usize> for Pool<T> {
-    fn index_mut<'a>(&'a mut self, i: usize) -> &'a mut T {
+impl  IndexMut<usize> for Pool {
+    fn index_mut<'a>(&'a mut self, i: usize) -> &'a mut Page {
         unsafe {
             let ptr = self.buffer.clone()
                 .offset((i * self.slot_size) as isize)
