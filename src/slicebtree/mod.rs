@@ -70,7 +70,7 @@ impl NodeHeader {
 #[repr(C)]
 struct EntryLocation {
     page_index: usize,
-    offset: u16,
+    offset: usize,
 }
 
 #[repr(u8)]
@@ -83,13 +83,13 @@ enum EntryType {
 #[repr(C)]
 struct ByteStringEntryAlias {
     entry_type: EntryType,
-    num_segments: u16,
+    num_segments: usize,
     // sizeof(EntryLocation) * num_segments
 }
 
 #[repr(C)]
 struct ByteStringEntry {
     entry_type: EntryType,
-    data_size: u16,
+    data_size: usize,
     // data_size bytes of data
 }
