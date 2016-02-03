@@ -4,13 +4,11 @@ use std::ops::{Index, IndexMut};
 use std::collections::LinkedList;
 use std::ptr;
 
+pub use self::page::*;
 
+pub mod page;
 pub mod tests;
 
-/// Each page is 4096 bytes
-pub type Page = [u8; 0x1000];
-
-pub type SlotIndex = usize;
 
 /// A pool represents a fixed number of ref-counted objects.
 /// The pool treats all given space as an unallocated
@@ -30,7 +28,7 @@ pub struct Pool {
     slot_size: usize,
     header_size: usize,
 
-    free_list: LinkedList<SlotIndex>,
+    free_list: LinkedList<PageIndex>,
 }
 
 struct SlotHeader {
@@ -39,16 +37,16 @@ struct SlotHeader {
 
 /// Public interface
 impl Pool {
-    pub fn new(mem: &mut [u8]) -> Pool {
-        let ptr: *mut u8 = mem.as_mut_ptr();
+    pub fn new(buf: &mut [u8]) -> Pool {
+        let ptr: *mut u8 = buf.as_mut_ptr();
         let header_size = mem::size_of::<SlotHeader>();
         let slot_size = mem::size_of::<Page>() + header_size;
         Pool {
             buffer: ptr,
-            buffer_size: mem.len(),
+            buffer_size: buf.len(),
             tail: AtomicUsize::new(0),
             slot_size: slot_size,
-            capacity: mem.len() / slot_size,
+            capacity: buf.len() / slot_size,
             header_size: header_size,
             free_list: LinkedList::new(),
         }
@@ -67,7 +65,7 @@ impl Pool {
 
     /// Fast copy a slot's contents to a new slot and return
     /// a pointer to the new slot
-    pub fn alloc_with_contents_of(&mut self, other: SlotIndex) -> Result<SlotIndex, &'static str> {
+    pub fn alloc_with_contents_of(&mut self, other: PageIndex) -> Result<PageIndex, &'static str> {
         let index = try!(self.claim_free_index());
         unsafe {
             let from = self.raw_contents_for(other);
@@ -79,13 +77,13 @@ impl Pool {
 
     /// Try to allocate a new item from the pool.
     /// A mutable reference to the item is returned on success
-    pub fn alloc(&mut self) -> Result<SlotIndex, &'static str> {
+    pub fn alloc(&mut self) -> Result<PageIndex, &'static str> {
         let index = try!(self.internal_alloc());
         Ok(index)
     }
 
     // Increase the ref count for the cell at the given index
-    pub fn retain(&mut self, index: SlotIndex) {
+    pub fn retain(&mut self, index: PageIndex) {
         let h = self.header_for(index);
         loop {
             let old = h.ref_count.load(Ordering::Relaxed);
@@ -98,7 +96,7 @@ impl Pool {
     }
 
     // Decrease the ref count for the cell at the given index
-    pub fn release(&mut self, index: SlotIndex) {
+    pub fn release(&mut self, index: PageIndex) {
         let mut is_free = false;
         { // Make the borrow checker happy
             let h = self.header_for(index);
@@ -132,7 +130,7 @@ impl Pool {
 impl  Pool {
     // Returns an item from the free list, or
     // tries to allocate a new one from the buffer
-    fn claim_free_index(&mut self) -> Result<SlotIndex, &'static str> {
+    fn claim_free_index(&mut self) -> Result<PageIndex, &'static str> {
         let index = match self.free_list.pop_front() {
             Some(i) => i,
             None => try!(self.push_back_alloc()),
@@ -142,14 +140,14 @@ impl  Pool {
     }
 
     // Internal alloc that does not create an Arc but still claims a slot
-    fn internal_alloc(&mut self) -> Result<SlotIndex, &'static str> {
+    fn internal_alloc(&mut self) -> Result<PageIndex, &'static str> {
         let index = try!(self.claim_free_index());
         Ok(index)
     }
 
     // Pushes the end of the used space in the buffer back
     // returns the previous index
-    fn push_back_alloc(&mut self) -> Result<SlotIndex, &'static str> {
+    fn push_back_alloc(&mut self) -> Result<PageIndex, &'static str> {
         loop {
             let old_tail = self.tail.load(Ordering::Relaxed);
             let swap = self.tail.compare_and_swap(old_tail, old_tail+1, Ordering::Relaxed);
@@ -163,7 +161,7 @@ impl  Pool {
         }
     }
 
-    fn header_for<'a>(&'a mut self, i: SlotIndex) -> &'a mut SlotHeader {
+    fn header_for<'a>(&'a mut self, i: PageIndex) -> &'a mut SlotHeader {
         unsafe {
             let ptr = self.buffer.clone()
                 .offset((i * self.slot_size) as isize);
@@ -171,7 +169,7 @@ impl  Pool {
         }
     }
 
-    fn raw_contents_for<'a>(&'a mut self, i: SlotIndex) -> *mut u8 {
+    fn raw_contents_for<'a>(&'a mut self, i: PageIndex) -> *mut u8 {
         unsafe {
             self.buffer.clone()
                 .offset((i * self.slot_size) as isize)
@@ -180,7 +178,7 @@ impl  Pool {
     }
 }
 
-impl Index<SlotIndex> for Pool {
+impl Index<PageIndex> for Pool {
     type Output = Page;
 
     fn index<'a>(&'a self, i: usize) -> &'a Page {
@@ -193,7 +191,7 @@ impl Index<SlotIndex> for Pool {
     }
 }
 
-impl IndexMut<SlotIndex> for Pool {
+impl IndexMut<PageIndex> for Pool {
     fn index_mut<'a>(&'a mut self, i: usize) -> &'a mut Page {
         unsafe {
             let ptr = self.buffer.clone()
