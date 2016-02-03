@@ -1,5 +1,5 @@
-/// N-headed, Copy-on-Write B+Tree map
-/// Supports MVCC up to N revisions
+/// 2-headed, Copy-on-Write B+Tree map
+/// Supports MVCC up to 2 revisions
 /// Lives entirely within the slice that is given to it.
 /// Keys and Values are byte slices. There is no max
 /// size for keys or values.
@@ -8,17 +8,9 @@ use std::mem;
 use self::NodeType::*;
 use allocator::*;
 
-pub struct Options {
-    num_heads: usize,
-    b: usize,
-}
 
-pub fn defaults() -> Options {
-    Options {
-        num_heads: 2,
-        b: 100,
-    }
-}
+pub const N: usize = 2;
+pub const B: usize = 100;
 
 #[repr(u8)]
 enum NodeType {
@@ -66,6 +58,28 @@ struct NodeHeader {
     data_offset_end: u64,
 }
 
+#[repr(C, packed)]
+struct LeafNodeData {
+    keys_data: [Arc<Page>; B],
+    values_data: [Arc<Page>; B],
+}
 
-/// Each page is 64Kb
-type Page = [u8; 0x10000];
+#[repr(C, packed)]
+struct InternalNodeData {
+    keys_data: [Arc<Page>; B],
+    children_data: [Arc<Page>; B],
+}
+
+#[repr(C, packed)]
+struct RootNodeData {
+    keys_data: [Arc<Page>; B],
+    children_data: [Arc<Page>; B],
+}
+
+#[repr(C, packed)]
+struct KeyPage {
+
+}
+
+/// Each page is 4096 bytes
+type Page = [u8; 0x1000];

@@ -24,7 +24,7 @@ pub struct Arc<T> {
 impl <T> Arc<T> {
     /// If you want to manually manage the memory or
     /// use the wrapped reference outside of the Arc system
-    /// retain/release provide an escape hatch.
+    /// the retain/release functions provide an escape hatch.
     /// Retain will increment the reference count
     pub unsafe fn retain(&mut self) {
         self.get_pool().retain(self.index);
@@ -32,7 +32,7 @@ impl <T> Arc<T> {
 
     /// If you want to manually manage the memory or
     /// use the wrapped reference outside of the Arc system
-    /// retain/release provide an escape hatch.
+    /// the retain/release functions provide an escape hatch.
     /// Release will decrement the reference count
     pub unsafe fn release(&mut self) {
         self.get_pool().release(self.index);
