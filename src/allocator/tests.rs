@@ -62,7 +62,7 @@ fn free_list_alloc_works() {
     let mut p = Pool::new(&mut buf[..], 0xF);
     {
         let mut int1 = p.alloc().unwrap();
-        *int1 = 42;
+        p[int1] = 42;
         // Check payload
         assert_eq!([42u8, 0u8, 0u8, 0u8][..], buf[8..12]);
         // Check ref_count
@@ -86,7 +86,7 @@ fn multiple_allocations_work() {
     let mut p = Pool::new(&mut buf[..], 0xF);
     for i in 0..10 {
         let mut int1 = p.alloc().unwrap();
-        *int1 = i;
+        p[int1] = i;
         unsafe { int1.retain() }; // Make sure this stays around long enough to read later
    }
    assert_eq!(10, p.live_count());

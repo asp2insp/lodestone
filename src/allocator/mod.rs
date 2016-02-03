@@ -32,7 +32,7 @@ pub struct Pool {
     slot_size: usize,
     header_size: usize,
 
-    free_list: LinkedList<usize>,
+    free_list: LinkedList<SlotIndex>,
 }
 
 struct SlotHeader {
