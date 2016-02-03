@@ -20,8 +20,6 @@ pub type SlotIndex = usize;
 ///   - [0..2] ref_count: u16
 ///
 pub struct Pool {
-    id: usize,
-
     buffer: *mut u8,
     buffer_size: usize,
     capacity: usize,
@@ -41,12 +39,11 @@ struct SlotHeader {
 
 /// Public interface
 impl Pool {
-    pub fn new(mem: &mut [u8], id: usize) -> Pool {
+    pub fn new(mem: &mut [u8]) -> Pool {
         let ptr: *mut u8 = mem.as_mut_ptr();
         let header_size = mem::size_of::<SlotHeader>();
         let slot_size = mem::size_of::<Page>() + header_size;
         Pool {
-            id: id,
             buffer: ptr,
             buffer_size: mem.len(),
             tail: AtomicUsize::new(0),
@@ -88,7 +85,7 @@ impl Pool {
     }
 
     // Increase the ref count for the cell at the given index
-    pub fn retain(&mut self, index: usize) {
+    pub fn retain(&mut self, index: SlotIndex) {
         let h = self.header_for(index);
         loop {
             let old = h.ref_count.load(Ordering::Relaxed);
@@ -101,7 +98,7 @@ impl Pool {
     }
 
     // Decrease the ref count for the cell at the given index
-    pub fn release(&mut self, index: usize) {
+    pub fn release(&mut self, index: SlotIndex) {
         let mut is_free = false;
         { // Make the borrow checker happy
             let h = self.header_for(index);
