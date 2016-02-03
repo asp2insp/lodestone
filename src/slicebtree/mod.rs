@@ -24,15 +24,18 @@ enum NodeType {
 pub struct BTree<'a> {
     page_pool: Pool,
     current_root: &'a NodeHeader,
-    roots: [&'a NodeHeader; 2],
+    roots: Vec<&'a NodeHeader>,
 }
 
 /// Public API
 impl <'a> BTree<'a> {
     pub fn new(buf: &'a mut [u8]) -> Result<BTree, &'static str> {
         let mut page_pool = Pool::new(buf);
-        let root_a_i = try!(page_pool.alloc());
-        let root_b_i = try!(page_pool.alloc());
+        let mut roots = vec![];
+        for _ in 0..N {
+            let p = try!(page_pool.alloc());
+            roots.push(NodeHeader::new_in_page(p));
+        }
 
         Err("Not implemented yet")
     }
