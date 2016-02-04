@@ -7,10 +7,25 @@ pub type PageIndex = usize;
 
 pub trait FlexibleMemory {
     fn transmute_page<T>(&self) -> &T;
-    fn transmute_segment<T>(&self, offset: u16) -> &T;
+    fn transmute_segment<T>(&self, offset: usize) -> &T;
 
-    fn transmute_page_mut<T>(&mut self) -> &mut T;
-    fn transmute_segment_mut<T>(&mut self, offset: u16) -> &mut T;
+    fn transmute_page_mut<T>(&self) -> &mut T;
+    fn transmute_segment_mut<T>(&self, offset: usize) -> &mut T;
+}
+
+pub trait UndefinedBehavior {
+    fn borrow_mut(&self) -> &mut Self;
+}
+
+/// OBVIOUSLY VERY UNSAFE.
+/// TODO: MAKE THIS BETTER?
+impl UndefinedBehavior for Page {
+    fn borrow_mut(&self) -> &mut Page {
+        let ptr: *const Page = self;
+        unsafe {
+            mem::transmute(ptr)
+        }
+    }
 }
 
 impl FlexibleMemory for Page {
@@ -21,24 +36,22 @@ impl FlexibleMemory for Page {
         }
     }
 
-    fn transmute_segment<T>(&self, offset: u16) -> &T {
-        let offset = offset as usize;
+    fn transmute_segment<T>(&self, offset: usize) -> &T {
         let subsection = &self[offset];
         unsafe {
             mem::transmute(subsection)
         }
     }
 
-    fn transmute_page_mut<T>(&mut self) -> &mut T {
-        let subsection = &mut self[0];
+    fn transmute_page_mut<T>(&self) -> &mut T {
+        let subsection = &mut self.borrow_mut()[0];
         unsafe {
             mem::transmute(subsection)
         }
     }
 
-    fn transmute_segment_mut<T>(&mut self, offset: u16) -> &mut T {
-        let offset = offset as usize;
-        let subsection = &mut self[offset];
+    fn transmute_segment_mut<T>(&self, offset: usize) -> &mut T {
+        let subsection = &mut self.borrow_mut()[offset];
         unsafe {
             mem::transmute(subsection)
         }

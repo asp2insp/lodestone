@@ -1,4 +1,5 @@
 use std::mem;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::ops::{Index, IndexMut};
 use std::collections::LinkedList;
@@ -24,7 +25,7 @@ pub struct Pool {
     slot_size: usize,
     header_size: usize,
 
-    free_list: LinkedList<PageIndex>,
+    free_list: RefCell<LinkedList<PageIndex>>,
 }
 
 struct SlotHeader {
@@ -44,7 +45,7 @@ impl Pool {
             slot_size: slot_size,
             capacity: buf.len() / slot_size,
             header_size: header_size,
-            free_list: LinkedList::new(),
+            free_list: RefCell::new(LinkedList::new()),
         }
     }
 
@@ -61,7 +62,7 @@ impl Pool {
 
     /// Fast copy a slot's contents to a new slot and return
     /// a pointer to the new slot
-    pub fn alloc_with_contents_of(&mut self, other: PageIndex) -> Result<PageIndex, &'static str> {
+    pub fn alloc_with_contents_of(&self, other: PageIndex) -> Result<PageIndex, &'static str> {
         let index = try!(self.claim_free_index());
         unsafe {
             let from = self.raw_contents_for(other);
@@ -73,19 +74,19 @@ impl Pool {
 
     /// Try to allocate a new item from the pool.
     /// A mutable reference to the item is returned on success
-    pub fn alloc(&mut self) -> Result<PageIndex, &'static str> {
+    pub fn alloc(&self) -> Result<PageIndex, &'static str> {
         let index = try!(self.internal_alloc());
         Ok(index)
     }
 
     // Increase the ref count for the cell at the given index
-    pub fn retain(&mut self, index: PageIndex) {
+    pub fn retain(&self, index: PageIndex) {
         let h = self.header_for(index);
         let old = h.ref_count.fetch_add(1, Ordering::SeqCst);
     }
 
     // Decrease the ref count for the cell at the given index
-    pub fn release(&mut self, index: PageIndex) {
+    pub fn release(&self, index: PageIndex) {
         let mut is_free = false;
         { // Make the borrow checker happy
             let h = self.header_for(index);
@@ -96,23 +97,23 @@ impl Pool {
             }
         }
         if is_free {
-            self.free_list.push_back(index);
+            self.free_list.borrow_mut().push_back(index);
         }
     }
 
     /// Returns the number of live items. O(1) running time.
     pub fn live_count(&self) -> usize {
-        self.tail.load(Ordering::Relaxed) - self.free_list.len()
+        self.tail.load(Ordering::SeqCst) - self.free_list.borrow().len()
     }
 }
 
 
 /// Internal Functions
-impl  Pool {
+impl Pool {
     // Returns an item from the free list, or
     // tries to allocate a new one from the buffer
-    fn claim_free_index(&mut self) -> Result<PageIndex, &'static str> {
-        let index = match self.free_list.pop_front() {
+    fn claim_free_index(&self) -> Result<PageIndex, &'static str> {
+        let index = match self.free_list.borrow_mut().pop_front() {
             Some(i) => i,
             None => try!(self.push_back_alloc()),
         };
@@ -121,28 +122,23 @@ impl  Pool {
     }
 
     // Internal alloc that does not create an Arc but still claims a slot
-    fn internal_alloc(&mut self) -> Result<PageIndex, &'static str> {
+    fn internal_alloc(&self) -> Result<PageIndex, &'static str> {
         let index = try!(self.claim_free_index());
         Ok(index)
     }
 
     // Pushes the end of the used space in the buffer back
     // returns the previous index
-    fn push_back_alloc(&mut self) -> Result<PageIndex, &'static str> {
-        loop {
-            let old_tail = self.tail.load(Ordering::Relaxed);
-            let swap = self.tail.compare_and_swap(old_tail, old_tail+1, Ordering::Relaxed);
-            // If we were the ones to claim this slot, or
-            // we've overrun the buffer, return
-            if old_tail >= self.capacity {
-                return Err("OOM")
-            } else if swap == old_tail {
-                return Ok(old_tail)
-            }
+    fn push_back_alloc(&self) -> Result<PageIndex, &'static str> {
+        let old_tail = self.tail.fetch_add(1, Ordering::SeqCst);
+        if old_tail >= self.capacity {
+            Err("OOM")
+        } else {
+            Ok(old_tail)
         }
     }
 
-    fn header_for<'a>(&'a mut self, i: PageIndex) -> &'a mut SlotHeader {
+    fn header_for<'a>(&'a self, i: PageIndex) -> &'a mut SlotHeader {
         unsafe {
             let ptr = self.buffer.clone()
                 .offset((i * self.slot_size) as isize);
@@ -150,7 +146,7 @@ impl  Pool {
         }
     }
 
-    fn raw_contents_for<'a>(&'a mut self, i: PageIndex) -> *mut u8 {
+    fn raw_contents_for<'a>(&'a self, i: PageIndex) -> *mut u8 {
         unsafe {
             self.buffer.clone()
                 .offset((i * self.slot_size) as isize)
@@ -198,12 +194,12 @@ fn release_frees() {
 
        p.release(0);
        assert_eq!(1, p.live_count());
-       assert_eq!(1, p.free_list.len());
-       assert_eq!(0, *p.free_list.front().unwrap());
+       assert_eq!(1, p.free_list.borrow().len());
+       assert_eq!(0, *p.free_list.borrow().front().unwrap());
 
        p.release(1);
        assert_eq!(0, p.live_count());
-       assert_eq!(2, p.free_list.len());
+       assert_eq!(2, p.free_list.borrow().len());
 }
 
 #[test]
@@ -216,12 +212,12 @@ fn alloc_after_free_recycles() {
 
        p.release(0);
        assert_eq!(0, p.live_count());
-       assert_eq!(1, p.free_list.len());
+       assert_eq!(1, p.free_list.borrow().len());
 
        assert!(p.internal_alloc().is_ok());
        assert_eq!(1, p.tail.load(Ordering::Relaxed)); // Tail shouldn't move
        assert_eq!(1, p.live_count());
-       assert_eq!(0, p.free_list.len());
+       assert_eq!(0, p.free_list.borrow().len());
 }
 
 #[test]

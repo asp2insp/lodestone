@@ -1,8 +1,10 @@
-use std::mem;
+use std::{mem, slice};
 use allocator::*;
 
 use super::*;
 use super::entry_location::*;
+use self::NodeType::*;
+use self::EntryType::*;
 
 
 #[repr(u8)]
@@ -30,8 +32,8 @@ pub struct NodeHeader {
 }
 
 impl NodeHeader {
-    pub fn from_entry<'a>(e: &EntryLocation, pool: &'a mut Pool) -> &'a mut NodeHeader {
-        pool[e.page_index].transmute_page_mut::<NodeHeader>()
+    pub fn from_entry<'a>(e: &EntryLocation, pool: &'a Pool) -> &'a mut NodeHeader {
+        pool[e.page_index].borrow_mut().transmute_page_mut::<NodeHeader>()
     }
 
     /// Perform initial setup, such as fixing the keys/children arrays,
@@ -57,6 +59,74 @@ impl NodeHeader {
     }
 }
 
+pub fn release_node(entry: &EntryLocation, pool: &Pool) {
+    let node = NodeHeader::from_entry(entry, pool);
+    match node.node_type {
+        Root | Internal => {
+            for e in node.children.iter() {
+                if *e == END {
+                    break;
+                }
+                // ------------------------------------
+                // TODO figure out when to recurse here
+                // ------------------------------------
+                release_node(e, pool);
+            }
+        },
+        Leaf => {
+            for e in node.children.iter() {
+                if *e == END {
+                    break;
+                }
+                release_byte_string(e, pool);
+            }
+        },
+        _ => {},
+    }
+    for e in node.keys.iter() {
+        if *e == END {
+            break;
+        }
+        release_byte_string(e, pool);
+    }
+}
+
+/// Decrement the ref count for the given byte string
+pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
+    match get_entry_type(entry, pool) {
+        Entry => pool.release(entry.page_index),
+        Deleted => {},
+        Alias => {
+            for e in get_aliased_entries(entry, pool) {
+                release_byte_string(e, pool);
+            }
+        }
+    }
+}
+
+
+/// Get the type of the entry pointed to by the location
+fn get_entry_type(entry: &EntryLocation, pool: &Pool) -> EntryType {
+    pool[entry.page_index]
+        .transmute_segment::<EntryType>(entry.offset)
+        .clone()
+}
+
+/// Returns a slice of the entries which are aliased by the given entry
+fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[EntryLocation] {
+    let header: &ByteStringEntryAlias = pool[entry.page_index]
+        .transmute_segment(entry.offset);
+
+    let start = entry.offset + mem::size_of::<ByteStringEntryAlias>();
+    let start_ptr: *const u8 = &pool[entry.page_index][start];
+
+    unsafe {
+        let start_ptr: *const EntryLocation = mem::transmute(start_ptr);
+        slice::from_raw_parts(start_ptr, header.num_segments)
+    }
+}
+
+#[derive(Clone)]
 #[repr(u8)]
 pub enum EntryType {
     Alias,
