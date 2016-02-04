@@ -6,10 +6,10 @@ use super::entry_location::*;
 use self::NodeType::*;
 use self::EntryType::*;
 
-
+#[derive(Clone, PartialEq, Debug)]
 #[repr(u8)]
 pub enum NodeType {
-    Meta,
+    Meta = 0x5,
     Root,
     Internal,
     Leaf,
@@ -59,7 +59,8 @@ impl NodeHeader {
     }
 }
 
-pub fn release_node(entry: &EntryLocation, pool: &Pool) {
+/// Returns true if this node is now completely removed
+pub fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
     let node = NodeHeader::from_entry(entry, pool);
     match node.node_type {
         Root | Internal => {
@@ -67,10 +68,10 @@ pub fn release_node(entry: &EntryLocation, pool: &Pool) {
                 if *e == END {
                     break;
                 }
-                // ------------------------------------
-                // TODO figure out when to recurse here
-                // ------------------------------------
-                release_node(e, pool);
+                let should_recurse = pool.release(e.page_index);
+                if should_recurse {
+                    release_node_contents(e, pool);
+                }
             }
         },
         Leaf => {
@@ -94,7 +95,9 @@ pub fn release_node(entry: &EntryLocation, pool: &Pool) {
 /// Decrement the ref count for the given byte string
 pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
     match get_entry_type(entry, pool) {
-        Entry => pool.release(entry.page_index),
+        Entry => {
+            pool.release(entry.page_index);
+        },
         Deleted => {},
         Alias => {
             for e in get_aliased_entries(entry, pool) {
@@ -113,9 +116,10 @@ fn get_entry_type(entry: &EntryLocation, pool: &Pool) -> EntryType {
 }
 
 /// Returns a slice of the entries which are aliased by the given entry
-fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[EntryLocation] {
+pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[EntryLocation] {
     let header: &ByteStringEntryAlias = pool[entry.page_index]
         .transmute_segment(entry.offset);
+    assert_eq!(Alias, header.entry_type);
 
     let start = entry.offset + mem::size_of::<ByteStringEntryAlias>();
     let start_ptr: *const u8 = &pool[entry.page_index][start];
@@ -126,10 +130,10 @@ fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[EntryLo
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 #[repr(u8)]
 pub enum EntryType {
-    Alias,
+    Alias = 0xA,
     Entry,
     Deleted,
 }
@@ -146,6 +150,53 @@ pub struct ByteStringEntry {
     entry_type: EntryType,
     data_size: usize,
     // data_size bytes of data
+}
+
+/// Treates the entry location as a ByteStringEntry
+/// Panics if not given the correct entry
+pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
+    let header: &ByteStringEntry = pool[entry.page_index]
+        .transmute_segment(entry.offset);
+    assert_eq!(Entry, header.entry_type);
+
+    let start = entry.offset + mem::size_of::<ByteStringEntry>();
+    &pool[entry.page_index][start..start+header.data_size]
+}
+
+/// Treates the entry location as a ByteStringEntry
+/// Panics if not given the correct entry
+pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] {
+    let header: &ByteStringEntry = pool[entry.page_index]
+        .transmute_segment(entry.offset);
+    assert_eq!(Entry, header.entry_type);
+
+    let start = entry.offset + mem::size_of::<ByteStringEntry>();
+
+    let page: &mut Page = pool[entry.page_index].borrow_mut();
+    &mut page[start..start+header.data_size]
+}
+
+/// Remove a byte string, releasing them memory referenced,
+/// and mark it as deleted, so that it will not be copied in the next
+/// insertion pass
+pub fn delete_byte_string(entry: &EntryLocation, pool: &Pool) {
+    match get_entry_type(entry, pool) {
+        Entry => {
+            let header: &mut ByteStringEntry = pool[entry.page_index]
+                .transmute_segment_mut(entry.offset);
+            header.entry_type = Deleted;
+            pool.release(entry.page_index);
+        },
+        Alias => {
+            let header: &mut ByteStringEntryAlias = pool[entry.page_index]
+                .transmute_segment_mut(entry.offset);
+            header.entry_type = Deleted;
+            for e in get_aliased_entries(entry, pool) {
+                delete_byte_string(e, pool);
+            }
+        },
+        _ => panic!("delete_entry called on {:?} which is not an Entry", entry),
+    }
 }
 
 #[test]

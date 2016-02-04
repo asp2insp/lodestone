@@ -82,11 +82,12 @@ impl Pool {
     // Increase the ref count for the cell at the given index
     pub fn retain(&self, index: PageIndex) {
         let h = self.header_for(index);
-        let old = h.ref_count.fetch_add(1, Ordering::SeqCst);
+        h.ref_count.fetch_add(1, Ordering::SeqCst);
     }
 
     // Decrease the ref count for the cell at the given index
-    pub fn release(&self, index: PageIndex) {
+    // return true iff the cell is now considered free
+    pub fn release(&self, index: PageIndex) -> bool {
         let mut is_free = false;
         { // Make the borrow checker happy
             let h = self.header_for(index);
@@ -99,6 +100,7 @@ impl Pool {
         if is_free {
             self.free_list.borrow_mut().push_back(index);
         }
+        is_free
     }
 
     /// Returns the number of live items. O(1) running time.
