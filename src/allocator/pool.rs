@@ -81,14 +81,7 @@ impl Pool {
     // Increase the ref count for the cell at the given index
     pub fn retain(&mut self, index: PageIndex) {
         let h = self.header_for(index);
-        loop {
-            let old = h.ref_count.load(Ordering::Relaxed);
-            let swap = h.ref_count
-            .compare_and_swap(old, old+1, Ordering::Relaxed);
-            if swap == old {
-                break
-            }
-        }
+        let old = h.ref_count.fetch_add(1, Ordering::SeqCst);
     }
 
     // Decrease the ref count for the cell at the given index
@@ -96,18 +89,10 @@ impl Pool {
         let mut is_free = false;
         { // Make the borrow checker happy
             let h = self.header_for(index);
-            loop {
-                let old = h.ref_count.load(Ordering::Relaxed);
-                assert!(old > 0, "Release called on [{}] which has no refs!", index);
-
-                let swap = h.ref_count
-                .compare_and_swap(old, old-1, Ordering::Relaxed);
-                if swap == old {
-                    if old == 1 { // this was the last reference
-                        is_free = true;
-                    }
-                    break
-                }
+            let old = h.ref_count.fetch_sub(1, Ordering::SeqCst);
+            if old == 1 {
+                // TODO: check the correctness of this
+                is_free = true;
             }
         }
         if is_free {

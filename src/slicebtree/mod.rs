@@ -4,40 +4,50 @@
 /// Keys and Values are byte slices.
 
 use std::mem;
-use self::NodeType::*;
+use self::node::*;
+use self::entry_location::*;
+use self::node::NodeType::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use allocator::*;
 
+pub mod node;
+pub mod entry_location;
 
 pub const N: usize = 2;
 pub const B: usize = 100;
 
-#[repr(u8)]
-enum NodeType {
-    Meta,
-    Root,
-    Internal,
-    Leaf,
-}
-
 /// Maps arbitrary [u8] to [u8].
 /// One value per key
-pub struct BTree<'a> {
+pub struct BTree {
     page_pool: Pool,
-    current_root: &'a NodeHeader,
-    roots: Vec<&'a NodeHeader>,
+    current_root: AtomicUsize,
+    tx_id: AtomicUsize,
+    roots: Vec<EntryLocation>,
 }
 
 /// Public API
-impl <'a> BTree<'a> {
-    pub fn new(buf: &'a mut [u8]) -> Result<BTree, &'static str> {
+impl BTree {
+    pub fn new(buf: &mut [u8]) -> BTree {
         let mut page_pool = Pool::new(buf);
-        let mut roots = vec![];
+        let mut roots:Vec<EntryLocation> = vec![];
+
         for _ in 0..N {
-            let p = try!(page_pool.alloc());
-            roots.push(NodeHeader::new_in_page(p));
+            roots.push(EntryLocation {
+                page_index: page_pool.alloc().unwrap(),
+                offset: 0,
+            });
         }
 
-        Err("Not implemented yet")
+        for root in &roots {
+            NodeHeader::from_entry(root, &mut page_pool).init(0, Root);
+        }
+
+        BTree {
+            page_pool: page_pool,
+            roots: roots,
+            tx_id: AtomicUsize::new(0),
+            current_root: AtomicUsize::new(0),
+        }
     }
 
     pub fn open() {
@@ -46,52 +56,6 @@ impl <'a> BTree<'a> {
 }
 
 /// Internal Functions
-impl <'a> BTree<'a> {
+impl BTree {
 
-}
-
-/// The structure of a tree is a series of Nodes.
-/// Each node is made up of at least 1 page.
-/// The first page is interpreted as a NodeHeader + data
-/// subsequent pages are interpreted as data based on the
-/// NodeType defined by the header.
-#[repr(C)]
-struct NodeHeader {
-    node_type: NodeType,
-    tx_id: usize,
-    keys: [EntryLocation; B],
-    children: [EntryLocation; B],
-}
-
-impl NodeHeader {
-    fn new_in_page(p: &mut Page) -> &NodeHeader {
-        p.transmute_page::<NodeHeader>()
-    }
-}
-
-#[repr(C)]
-struct EntryLocation {
-    page_index: usize,
-    offset: usize,
-}
-
-#[repr(u8)]
-enum EntryType {
-    Alias,
-    Entry,
-    Deleted,
-}
-
-#[repr(C)]
-struct ByteStringEntryAlias {
-    entry_type: EntryType,
-    num_segments: usize,
-    // sizeof(EntryLocation) * num_segments
-}
-
-#[repr(C)]
-struct ByteStringEntry {
-    entry_type: EntryType,
-    data_size: usize,
-    // data_size bytes of data
 }
