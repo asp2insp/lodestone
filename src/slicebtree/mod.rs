@@ -3,7 +3,6 @@
 /// Lives entirely within the slice that is given to it.
 /// Keys and Values are byte slices.
 
-use std::mem;
 use self::node::*;
 use self::entry_location::*;
 use self::node::NodeType::*;
@@ -11,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use allocator::*;
 
 pub mod node;
+pub mod byte_string;
 pub mod entry_location;
 
 pub const N: usize = 2;
