@@ -91,3 +91,47 @@ pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] 
     let page: &mut Page = pool[entry.page_index].borrow_mut();
     &mut page[start..start+header.data_size]
 }
+
+/// ITERATION
+/// Provides byte string iters
+
+pub struct ByteStringIter<'a> {
+    entry: &'a EntryLocation,
+    pool: &'a Pool,
+
+    is_aliased: bool,
+    current_page: &'a Page,
+    curent_entry: &'a EntryLocation,
+    current_string: &'a ByteStringEntry,
+    alias_index: usize,
+    byte_index: usize,
+}
+
+impl <'a> Iterator for ByteStringIter<'a> {
+    type Item = &'a u8;
+
+    fn next(&mut self) -> Option<&'a u8> {
+        let current_byte = &self.current_page
+            [self.current_entry.offset+self.byte_index];
+
+        // Increment our count, and roll over if necessary
+        self.byte_index += 1;
+        if self.byte_index >= self.current_entry.data_size {
+            if self.is_aliased {
+                self.alias_index += 1;
+                let entries = get_aliased_entries(self.entry, self.pool);
+                if self.alias_index >= entries.len() {
+                    return None
+                }
+                self.current_entry = &entries[self.alias_index];
+                self.current_string = self.pool[self.current_entry.page_index]
+                    .transmute_segment(self.current_entry.offset);
+                self.byte_index = 0;
+                self.current_page = self.pool[self.current_entry.page_index];
+            } else {
+                return None
+            }
+        }
+        Some(current_byte)
+    }
+}
