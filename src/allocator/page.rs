@@ -66,7 +66,7 @@ fn test_transmute_whole() {
         unsigned: usize,
     }
 
-    let mut p = [0u8; 0x1000];
+    let p = [0u8; 0x1000];
     {
         let c = p.transmute_page_mut::<Composite>();
         c.signed = -17;
@@ -85,7 +85,7 @@ fn test_transmute_part() {
         unsigned: usize,
     }
 
-    let mut p = [0u8; 0x1000];
+    let p = [0u8; 0x1000];
     {
         let c = p.transmute_segment_mut::<Composite>(64);
         c.signed = -17;

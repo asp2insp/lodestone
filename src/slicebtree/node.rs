@@ -27,7 +27,9 @@ pub enum NodeType {
 pub struct NodeHeader {
     node_type: NodeType,
     tx_id: usize,
+    num_keys: usize,
     keys: [EntryLocation; B],
+    num_children: usize,
     children: [EntryLocation; B],
 }
 
@@ -39,23 +41,10 @@ impl NodeHeader {
     /// Perform initial setup, such as fixing the keys/children arrays,
     /// setting the tx_id
     pub fn init(&mut self, tx: usize, node_type: NodeType) {
-        for i in 0..B {
-            self.keys[i] = END.clone();
-            self.children[i] = END.clone();
-        }
+        self.num_keys = 0;
+        self.num_children = 0;
         self.node_type = node_type;
         self.tx_id = tx;
-    }
-
-    pub fn num_children(&self) -> usize {
-        let mut c = 0usize;
-        for entry in self.children.iter() {
-            if entry == &END {
-                break;
-            }
-            c += 1;
-        }
-        c
     }
 }
 
@@ -64,35 +53,29 @@ pub fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
     let node = NodeHeader::from_entry(entry, pool);
     match node.node_type {
         Root | Internal => {
-            for e in node.children.iter() {
-                if *e == END {
-                    break;
-                }
+            for e in node.children.iter().take(node.num_children) {
                 let should_recurse = pool.release(e.page_index);
+                // If this node is now dead, we can recursively
+                // remove its contents
                 if should_recurse {
                     release_node_contents(e, pool);
                 }
             }
         },
         Leaf => {
-            for e in node.children.iter() {
-                if *e == END {
-                    break;
-                }
+            for e in node.children.iter().take(node.num_children) {
                 release_byte_string(e, pool);
             }
         },
         _ => {},
     }
-    for e in node.keys.iter() {
-        if *e == END {
-            break;
-        }
+    for e in node.keys.iter().take(node.num_keys) {
         release_byte_string(e, pool);
     }
 }
 
 /// Decrement the ref count for the given byte string
+/// Follow aliases to release all their byte strings
 pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
     match get_entry_type(entry, pool) {
         Entry => {
@@ -103,6 +86,9 @@ pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
             for e in get_aliased_entries(entry, pool) {
                 release_byte_string(e, pool);
             }
+            // Once we've followed and release all the aliased
+            // strings, release this alias.
+            pool.release(entry.page_index);
         }
     }
 }
@@ -176,28 +162,27 @@ pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] 
     &mut page[start..start+header.data_size]
 }
 
-/// Remove a byte string, releasing them memory referenced,
-/// and mark it as deleted, so that it will not be copied in the next
-/// insertion pass
-pub fn delete_byte_string(entry: &EntryLocation, pool: &Pool) {
-    match get_entry_type(entry, pool) {
-        Entry => {
-            let header: &mut ByteStringEntry = pool[entry.page_index]
-                .transmute_segment_mut(entry.offset);
-            header.entry_type = Deleted;
-            pool.release(entry.page_index);
-        },
-        Alias => {
-            let header: &mut ByteStringEntryAlias = pool[entry.page_index]
-                .transmute_segment_mut(entry.offset);
-            header.entry_type = Deleted;
-            for e in get_aliased_entries(entry, pool) {
-                delete_byte_string(e, pool);
-            }
-        },
-        _ => panic!("delete_entry called on {:?} which is not an Entry", entry),
-    }
-}
+/// TODO: remove this code. It should never be necessary to delete
+/// a byte string in a mutative fashion like this.
+// pub fn delete_byte_string(entry: &EntryLocation, pool: &Pool) {
+//     match get_entry_type(entry, pool) {
+//         Entry => {
+//             let header: &mut ByteStringEntry = pool[entry.page_index]
+//                 .transmute_segment_mut(entry.offset);
+//             header.entry_type = Deleted;
+//             pool.release(entry.page_index);
+//         },
+//         Alias => {
+//             let header: &mut ByteStringEntryAlias = pool[entry.page_index]
+//                 .transmute_segment_mut(entry.offset);
+//             header.entry_type = Deleted;
+//             for e in get_aliased_entries(entry, pool) {
+//                 delete_byte_string(e, pool);
+//             }
+//         },
+//         _ => panic!("delete_entry called on {:?} which is not an Entry", entry),
+//     }
+// }
 
 #[test]
 fn test_invariants() {
