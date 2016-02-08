@@ -49,11 +49,13 @@ fn get_entry_type(entry: &EntryLocation, pool: &Pool) -> EntryType {
         .clone()
 }
 
+fn get_entry_header<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut ByteStringEntry {
+    pool[entry.page_index].transmute_segment_mut::<ByteStringEntry>(entry.offset)
+}
 
 /// Returns a slice of the entries which are aliased by the given entry
 pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[EntryLocation] {
-    let header: &ByteStringEntry = pool[entry.page_index]
-        .transmute_segment(entry.offset);
+    let header = get_entry_header(entry, pool);
     assert_eq!(EntryType::Alias, header.entry_type);
 
     let start = entry.offset + mem::size_of::<ByteStringEntry>();
@@ -68,8 +70,7 @@ pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[Ent
 /// Treates the entry location as a ByteStringEntry
 /// Panics if not given the correct entry
 pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
-    let header: &ByteStringEntry = pool[entry.page_index]
-        .transmute_segment(entry.offset);
+    let header = get_entry_header(entry, pool);
     assert_eq!(EntryType::Entry, header.entry_type);
 
     let start = entry.offset + mem::size_of::<ByteStringEntry>();
@@ -79,8 +80,7 @@ pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
 /// Treates the entry location as a ByteStringEntry
 /// Panics if not given the correct entry
 pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] {
-    let header: &ByteStringEntry = pool[entry.page_index]
-        .transmute_segment(entry.offset);
+    let header = get_entry_header(entry, pool);
     assert_eq!(EntryType::Entry, header.entry_type);
 
     let start = entry.offset + mem::size_of::<ByteStringEntry>();
@@ -171,8 +171,58 @@ impl <'a> Iterator for ByteStringIter<'a> {
     }
 }
 
+
 #[test]
-fn test_get_slice_mut() {
+fn get_aliased_string() {
+    let mut buf = [0u8; 0x2000];
+    let pool = Pool::new(&mut buf);
+
+    let page_index = pool.alloc().unwrap();
+    let mut p: &Page = &pool[page_index];
+
+    let alias_loc = EntryLocation {
+        page_index: page_index,
+        offset: 0,
+    };
+
+    let mut alias = get_entry_header(&alias_loc, &pool);
+    alias.entry_type = EntryType::Alias;
+    alias.contents_size = 2;
+
+    let loc_size = mem::size_of::<EntryLocation>();
+    let header_size = mem::size_of::<EntryLocation>();
+
+    let mut entry1_loc = p.transmute_segment_mut::<EntryLocation>(header_size);
+    entry1_loc.page_index = page_index;
+    entry1_loc.offset = header_size+2*loc_size;
+    let mut entry1 = get_entry_header(entry1_loc, &pool);
+    entry1.entry_type = EntryType::Entry;
+    entry1.contents_size = 10;
+
+    let mut entry2_loc = p.transmute_segment_mut::<EntryLocation>(header_size+loc_size);
+    entry2_loc.page_index = page_index;
+    entry2_loc.offset = 2*header_size+2*loc_size+10;
+    let mut entry2 = get_entry_header(entry2_loc, &pool);
+    entry2.entry_type = EntryType::Entry;
+    entry2.contents_size = 10;
+
+    // Init the data as a slice
+    for iv in get_slice_mut(&entry1_loc, &pool).iter_mut().enumerate() {
+        *iv.1 = iv.0 as u8;
+    }
+    for iv in get_slice_mut(&entry2_loc, &pool).iter_mut().enumerate() {
+        *iv.1 = (iv.0 as u8) + 10u8;
+    }
+
+    // check the data via iterator
+    get_iter(&alias_loc, &pool).zip((0u8..)).fold(true, |b, actual_exp| {
+        assert_eq!(*actual_exp.0, actual_exp.1);
+        b && *actual_exp.0 == actual_exp.1
+    });
+}
+
+#[test]
+fn test_get_slice_mut_and_iter() {
     let mut buf = [0u8; 0x2000];
     let pool = Pool::new(&mut buf);
 
@@ -183,7 +233,7 @@ fn test_get_slice_mut() {
         offset: 0,
     };
 
-    let mut entry = p.transmute_page_mut::<ByteStringEntry>();
+    let mut entry = get_entry_header(&loc, &pool);
     entry.entry_type = EntryType::Entry;
     entry.contents_size = 10;
 
