@@ -1,4 +1,4 @@
-use std::mem;
+use std::{mem,cmp};
 use allocator::*;
 
 use super::*;
@@ -51,8 +51,40 @@ impl NodeHeader {
     }
 }
 
-/// Returns true if this node is now completely removed
-pub fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
+/// Binary search impl for finding the location at which the given
+/// key should be inserted
+fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) -> usize {
+    let mut top = n.num_keys;
+    let mut bottom = 0;
+    let mut i = top/2;
+
+    loop {
+        match cmp(key_loc, &n.keys[i], pool) {
+            cmp::Ordering::Equal => break,
+            cmp::Ordering::Less => top = i,
+            cmp::Ordering::Greater => bottom = i,
+        }
+        if top < bottom {
+            break;
+        }
+        i = bottom + (top + bottom)/2;
+    }
+    i
+}
+
+/// Precondition: The node must have enough space
+fn insert_non_full(n: &mut NodeHeader, key_loc: &EntryLocation, pool: &Pool) {
+    // First find the index where we want to insert
+    let index = find_insertion_index(n, key_loc, pool);
+    n.num_keys += 1;
+    for i in (index..n.num_keys).rev() {
+        n.keys[i] = n.keys[i-1].clone();
+    }
+    n.keys[index] = key_loc.clone();
+}
+
+/// Release the memory "owned" by the given node
+fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
     let node = NodeHeader::from_entry(entry, pool);
     match node.node_type {
         NodeType::Root | NodeType::Internal => {

@@ -1,4 +1,4 @@
-use std::{mem, slice};
+use std::{mem, slice, cmp};
 use allocator::*;
 
 use super::entry_location::*;
@@ -22,10 +22,15 @@ pub struct ByteStringEntry {
     // contents_size bytes of data
 }
 
+// Lexicographically compare the entries pointed to by e1 and e2
+pub fn cmp(e1: &EntryLocation, e2: &EntryLocation, p: &Pool) -> cmp::Ordering {
+    get_iter(e1, p).cmp(get_iter(e2, p))
+}
+
 /// Decrement the ref count for the given byte string
 /// Follow aliases to release all their byte strings
 pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
-    match get_entry_type(entry, pool) {
+    match get_entry_header(entry, pool).entry_type {
         EntryType::Entry => {
             pool.release(entry.page_index);
         },
@@ -41,14 +46,7 @@ pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
     }
 }
 
-
-/// Get the type of the entry pointed to by the location
-fn get_entry_type(entry: &EntryLocation, pool: &Pool) -> EntryType {
-    pool[entry.page_index]
-        .transmute_segment::<EntryType>(entry.offset)
-        .clone()
-}
-
+/// Get the header for the entry pointed to by the given location
 fn get_entry_header<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut ByteStringEntry {
     pool[entry.page_index].transmute_segment_mut::<ByteStringEntry>(entry.offset)
 }
@@ -92,7 +90,8 @@ pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] 
 /// Get the iter over the memory represented by the bytestring
 pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<'a> {
     let page = &pool[entry.page_index];
-    match get_entry_type(entry, pool) {
+    let header = get_entry_header(entry, pool);
+    match header.entry_type {
         EntryType::Entry => {
             ByteStringIter {
                 entry: entry,
@@ -101,7 +100,7 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
                 is_aliased: false,
                 current_page: page,
                 current_entry: entry,
-                current_string: pool[entry.page_index].transmute_segment(entry.offset),
+                current_string: header,
                 alias_index: 0,
                 byte_index: 0,
             }
@@ -115,7 +114,7 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
                 is_aliased: true,
                 current_page: page,
                 current_entry: first_entry,
-                current_string:  pool[first_entry.page_index].transmute_segment(first_entry.offset),
+                current_string: get_entry_header(first_entry, pool),
                 alias_index: 0,
                 byte_index: 0,
             }
@@ -150,7 +149,6 @@ impl <'a> Iterator for ByteStringIter<'a> {
 
         // Increment our count, and roll over if necessary
         self.byte_index += 1;
-        println!("{}/{}", self.byte_index, self.current_string.contents_size);
         if self.byte_index >= self.current_string.contents_size {
             if self.is_aliased {
                 self.alias_index += 1;
@@ -178,7 +176,7 @@ fn get_aliased_string() {
     let pool = Pool::new(&mut buf);
 
     let page_index = pool.alloc().unwrap();
-    let mut p: &Page = &pool[page_index];
+    let p: &Page = &pool[page_index];
 
     let alias_loc = EntryLocation {
         page_index: page_index,
@@ -227,7 +225,6 @@ fn test_get_slice_mut_and_iter() {
     let pool = Pool::new(&mut buf);
 
     let page_index = pool.alloc().unwrap();
-    let mut p: &Page = &pool[page_index];
     let loc = EntryLocation {
         page_index: page_index,
         offset: 0,
