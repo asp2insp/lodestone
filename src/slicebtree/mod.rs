@@ -5,7 +5,6 @@
 
 use self::node::*;
 use self::entry_location::*;
-use self::node::NodeType::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use allocator::*;
 
@@ -39,7 +38,7 @@ impl BTree {
         }
 
         for root in &roots {
-            NodeHeader::from_entry(root, &mut page_pool).init(0, Root);
+            NodeHeader::from_entry(root, &mut page_pool).init(0, MemType::Root);
         }
 
         BTree {

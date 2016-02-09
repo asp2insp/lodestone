@@ -1,3 +1,12 @@
+# WAY OUT OF DATE
+
+Currently, we have nodes, we have entries, and aliased entries.
+Every chunk of memory contains a flag MemType as the first byte.
+This byte is what's used to tag the memory. Memory is stored in pages.
+The page size matches the memory cache's page size (Currently 4K).
+Each page either contains data (in the form of ByteStringEntries) or
+tree structure (in the form of NodeHeaders).
+
 ##Node
 * NodeHeader
 * Node metadata

@@ -3,13 +3,6 @@ use allocator::*;
 
 use super::entry_location::*;
 
-#[derive(Clone, PartialEq, Debug)]
-#[repr(u8)]
-pub enum EntryType {
-    Alias = 0xA,
-    Entry,
-    Deleted,
-}
 
 /// If the entry is an alias, contents_size is the number
 /// of segments in the alias. If it's an entry, contents_size
@@ -17,7 +10,7 @@ pub enum EntryType {
 #[derive(Clone, PartialEq, Debug)]
 #[repr(C)]
 pub struct ByteStringEntry {
-    entry_type: EntryType,
+    entry_type: MemType,
     contents_size: usize,
     // contents_size bytes of data
 }
@@ -31,18 +24,19 @@ pub fn cmp(e1: &EntryLocation, e2: &EntryLocation, p: &Pool) -> cmp::Ordering {
 /// Follow aliases to release all their byte strings
 pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
     match get_entry_header(entry, pool).entry_type {
-        EntryType::Entry => {
+        MemType::Entry => {
             pool.release(entry.page_index);
         },
-        EntryType::Deleted => {},
-        EntryType::Alias => {
+        MemType::Deleted => {},
+        MemType::Alias => {
             for e in get_aliased_entries(entry, pool) {
                 release_byte_string(e, pool);
             }
             // Once we've followed and release all the aliased
             // strings, release this alias.
             pool.release(entry.page_index);
-        }
+        },
+        _ => {},
     }
 }
 
@@ -54,7 +48,7 @@ fn get_entry_header<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut ByteSt
 /// Returns a slice of the entries which are aliased by the given entry
 pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[EntryLocation] {
     let header = get_entry_header(entry, pool);
-    assert_eq!(EntryType::Alias, header.entry_type);
+    assert_eq!(MemType::Alias, header.entry_type);
 
     let start = entry.offset + mem::size_of::<ByteStringEntry>();
     let start_ptr: *const u8 = &pool[entry.page_index][start];
@@ -69,7 +63,7 @@ pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[Ent
 /// Panics if not given the correct entry
 pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
     let header = get_entry_header(entry, pool);
-    assert_eq!(EntryType::Entry, header.entry_type);
+    assert_eq!(MemType::Entry, header.entry_type);
 
     let start = entry.offset + mem::size_of::<ByteStringEntry>();
     &pool[entry.page_index][start..start+header.contents_size]
@@ -79,7 +73,7 @@ pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
 /// Panics if not given the correct entry
 pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] {
     let header = get_entry_header(entry, pool);
-    assert_eq!(EntryType::Entry, header.entry_type);
+    assert_eq!(MemType::Entry, header.entry_type);
 
     let start = entry.offset + mem::size_of::<ByteStringEntry>();
 
@@ -92,7 +86,7 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
     let page = &pool[entry.page_index];
     let header = get_entry_header(entry, pool);
     match header.entry_type {
-        EntryType::Entry => {
+        MemType::Entry => {
             ByteStringIter {
                 entry: entry,
                 pool: pool,
@@ -105,7 +99,7 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
                 byte_index: 0,
             }
         },
-        EntryType::Alias => {
+        MemType::Alias => {
             let first_entry = &get_aliased_entries(entry, pool)[0];
             ByteStringIter {
                 entry: entry,
@@ -119,8 +113,11 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
                 byte_index: 0,
             }
         },
-        EntryType::Deleted => {
+        MemType::Deleted => {
             panic!("get_iter called on a deleted entry");
+        },
+        _ => {
+            panic!("get_iter called on a Node instead of an entry");
         },
     }
 }
@@ -184,7 +181,7 @@ fn get_aliased_string() {
     };
 
     let mut alias = get_entry_header(&alias_loc, &pool);
-    alias.entry_type = EntryType::Alias;
+    alias.entry_type = MemType::Alias;
     alias.contents_size = 2;
 
     let loc_size = mem::size_of::<EntryLocation>();
@@ -194,14 +191,14 @@ fn get_aliased_string() {
     entry1_loc.page_index = page_index;
     entry1_loc.offset = header_size+2*loc_size;
     let mut entry1 = get_entry_header(entry1_loc, &pool);
-    entry1.entry_type = EntryType::Entry;
+    entry1.entry_type = MemType::Entry;
     entry1.contents_size = 10;
 
     let mut entry2_loc = p.transmute_segment_mut::<EntryLocation>(header_size+loc_size);
     entry2_loc.page_index = page_index;
     entry2_loc.offset = 2*header_size+2*loc_size+10;
     let mut entry2 = get_entry_header(entry2_loc, &pool);
-    entry2.entry_type = EntryType::Entry;
+    entry2.entry_type = MemType::Entry;
     entry2.contents_size = 10;
 
     // Init the data as a slice
@@ -231,7 +228,7 @@ fn test_get_slice_mut_and_iter() {
     };
 
     let mut entry = get_entry_header(&loc, &pool);
-    entry.entry_type = EntryType::Entry;
+    entry.entry_type = MemType::Entry;
     entry.contents_size = 10;
 
     // Init the data as a slice
