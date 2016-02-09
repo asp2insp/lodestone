@@ -15,4 +15,5 @@ pub enum MemType {
     Alias,
     Entry,
     Deleted,
+    //TODO determine whether I need a deleted node marker
 }

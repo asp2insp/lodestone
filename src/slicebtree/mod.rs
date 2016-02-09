@@ -5,6 +5,7 @@
 
 use self::node::*;
 use self::entry_location::*;
+use self::byte_string::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use allocator::*;
 
@@ -57,4 +58,18 @@ impl BTree {
 /// Internal Functions
 impl BTree {
 
+}
+
+
+
+/// Return the amount of free space left in a given page
+fn free_space(page: &Page) -> usize {
+    match page.transmute_segment::<MemType>(0) {
+        &MemType::Entry | &MemType::Alias | &MemType::Deleted => {
+            free_space_entry_page(page)
+        },
+        &MemType::Meta | &MemType::Root | &MemType::Internal | &MemType::Leaf => {
+            free_space_node_page(page)
+        }
+    }
 }

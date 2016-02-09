@@ -101,6 +101,11 @@ fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
     }
 }
 
+// Treat the given page as a set of nodes, return the remaining
+// free space in the page.
+pub fn free_space_node_page(_: &Page) -> usize {
+    0 // Nodes are designed to fill an entire page
+}
 
 #[test]
 fn test_invariants() {

@@ -59,6 +59,27 @@ pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[Ent
     }
 }
 
+// Treat the given page as a set of nodes, return the remaining
+// free space in the page.
+pub fn free_space_entry_page(page: &Page) -> usize {
+    mem::size_of::<Page>() - next_free_offset(page)
+}
+
+// Find the index of the start of free space
+pub fn next_free_offset(page: &Page) -> usize {
+    let mut offset = 0usize;
+    loop {
+        let header = page.transmute_segment::<ByteStringEntry>(offset);
+        match header.entry_type {
+            MemType::Entry | MemType::Alias | MemType::Deleted => {
+                offset += mem::size_of::<ByteStringEntry>() + header.contents_size;
+            },
+            _ => break,
+        }
+    }
+    offset
+}
+
 /// Treates the entry location as a ByteStringEntry
 /// Panics if not given the correct entry
 pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
@@ -166,10 +187,36 @@ impl <'a> Iterator for ByteStringIter<'a> {
     }
 }
 
+#[test]
+fn test_free_space_entry_page() {
+    let mut buf = [0u8; 0x1100];
+    let pool = Pool::new(&mut buf);
+
+    let page_index = pool.alloc().unwrap();
+    let page = &pool[page_index];
+    let mut loc = EntryLocation {
+        page_index: page_index,
+        offset: 0,
+    };
+
+    for i in 0..10 {
+        let remaining_space = mem::size_of::<Page>() - 36*i;
+        assert_eq!(remaining_space, free_space_entry_page(page));
+        assert_eq!(36*i, next_free_offset(page));
+
+        let mut entry = get_entry_header(&loc, &pool);
+        entry.entry_type = MemType::Entry;
+        entry.contents_size = 20;
+
+        loc.offset += 36;
+    }
+
+    assert_eq!(3736, free_space_entry_page(page));
+}
 
 #[test]
 fn get_aliased_string() {
-    let mut buf = [0u8; 0x2000];
+    let mut buf = [0u8; 0x1100];
     let pool = Pool::new(&mut buf);
 
     let page_index = pool.alloc().unwrap();
@@ -218,7 +265,7 @@ fn get_aliased_string() {
 
 #[test]
 fn test_get_slice_mut_and_iter() {
-    let mut buf = [0u8; 0x2000];
+    let mut buf = [0u8; 0x1100];
     let pool = Pool::new(&mut buf);
 
     let page_index = pool.alloc().unwrap();
