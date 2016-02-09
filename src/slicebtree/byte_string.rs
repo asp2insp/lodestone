@@ -1,4 +1,4 @@
-use std::{mem, slice, cmp};
+use std::{mem, slice, cmp, ptr};
 use allocator::*;
 
 use super::entry_location::*;
@@ -56,6 +56,34 @@ pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[Ent
     unsafe {
         let start_ptr: *const EntryLocation = mem::transmute(start_ptr);
         slice::from_raw_parts(start_ptr, header.contents_size)
+    }
+}
+
+/// Allocate a new byte string in the given page and populate it with the
+/// given contents. Returns Ok if the operation succeeded and Err if the
+/// page does not have capacity for the value.
+pub fn alloc_with_contents(page_index: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
+    let page = &pool[page_index];
+    let offset = next_free_offset(page);
+    let header_size = mem::size_of::<ByteStringEntry>();
+
+    // TODO add support for aliasing memory
+    if mem::size_of::<Page>() - offset < header_size + contents.len() {
+        Err("Not enough room")
+    } else {
+        let mut header = page.transmute_segment_mut::<ByteStringEntry>(offset);
+        header.entry_type = MemType::Entry;
+        header.contents_size = contents.len();
+
+        unsafe {
+            let to = &mut page.borrow_mut()[offset+header_size] as *mut u8;
+            let from = contents.as_ptr();
+            ptr::copy_nonoverlapping(from, to, contents.len());
+        }
+        Ok(EntryLocation {
+            page_index: page_index,
+            offset: offset,
+        })
     }
 }
 
@@ -185,6 +213,36 @@ impl <'a> Iterator for ByteStringIter<'a> {
         }
         Some(current_byte)
     }
+}
+
+#[test]
+fn test_alloc_with_contents() {
+    let mut buf = [0u8; 0x1100];
+    let pool = Pool::new(&mut buf);
+
+    let page_index = pool.alloc().unwrap();
+    let page = &pool[page_index];
+
+    for i in 0..10 {
+        let remaining_space = mem::size_of::<Page>() - 20*i;
+
+        assert_eq!(remaining_space, free_space_entry_page(page));
+        assert_eq!(20*i, next_free_offset(page));
+
+        let loc = alloc_with_contents(page_index, &[1u8, 2u8, 3u8, 4u8][..], &pool).unwrap();
+        let entry = get_entry_header(&loc, &pool);
+
+        assert_eq!(20*i, loc.offset);
+        assert_eq!(page_index, loc.page_index);
+        assert_eq!(4, entry.contents_size);
+
+        assert_eq!([1u8, 2u8, 3u8, 4u8][..], *get_slice(&loc, &pool));
+    }
+
+    assert_eq!(3896, free_space_entry_page(page));
+
+    // Test error case
+    assert_eq!(Err(""), alloc_with_contents(page_index, &[42u8; 4097][..], &pool));
 }
 
 #[test]

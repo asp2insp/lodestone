@@ -67,7 +67,7 @@ impl Pool {
         unsafe {
             let from = self.raw_contents_for(other);
             let to = self.raw_contents_for(index);
-            ptr::copy(from, to, mem::size_of::<Page>());
+            ptr::copy_nonoverlapping(from, to, mem::size_of::<Page>());
         }
         Ok(index)
     }

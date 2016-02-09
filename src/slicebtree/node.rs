@@ -65,6 +65,10 @@ fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) ->
 }
 
 /// Precondition: The node must have enough space
+/// The memory should already be allocated, this
+/// just inserts the reference in the correct location.
+/// TODO: evaluate whether locality makes it worth doing page
+/// hinting here to find the correct location.
 fn insert_non_full(n: &mut NodeHeader, key_loc: &EntryLocation, pool: &Pool) {
     // First find the index where we want to insert
     let index = find_insertion_index(n, key_loc, pool);
