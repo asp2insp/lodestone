@@ -78,8 +78,8 @@ pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[Ent
 
 #[inline]
 fn calc_num_chunks(size: usize) -> usize {
-    let spill = if size % *PAGE_SIZE == 0 {0} else {1};
-    size / *PAGE_SIZE + spill
+    let spill = if size % *BSE_CHUNK_SIZE == 0 {0} else {1};
+    size / *BSE_CHUNK_SIZE + spill
 }
 
 /// Allocate a new byte string and populate it with the
@@ -88,13 +88,10 @@ fn calc_num_chunks(size: usize) -> usize {
 pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
     let page = &pool[page_hint];
     let offset = next_free_offset(page);
-    let header_size = *BSE_HEADER_SIZE;
     let free_space = *PAGE_SIZE - offset;
-
-    let required_space = header_size + contents.len();
-
+    let required_space = *BSE_HEADER_SIZE + contents.len();
     // Check to see if we can append to the given page.
-    if free_space >= header_size + contents.len() {
+    if free_space >= required_space {
         append_to_with_contents(page_hint, contents, pool)
     } else {
         alias_alloc_with_contents(contents, pool)
@@ -115,7 +112,7 @@ pub fn alias_alloc_with_contents(contents: &[u8], pool: &Pool) -> Result<EntryLo
 
     let mut offset = *BSE_HEADER_SIZE;
     let mut contents_offset = 0;
-    for _ in 0..(num_chunks-1) {
+    for _ in 0..num_chunks {
         let index = try!(pool.alloc());
         let mut next = contents_offset + *BSE_CHUNK_SIZE;
         if next > contents.len() {
@@ -127,11 +124,14 @@ pub fn alias_alloc_with_contents(contents: &[u8], pool: &Pool) -> Result<EntryLo
         let mut el_ptr = page.transmute_segment_mut::<EntryLocation>(offset);
         el_ptr.page_index = loc.page_index;
         el_ptr.offset = loc.offset;
-        
+
         contents_offset = next;
         offset += *EL_PTR_SIZE;
     }
-    Err("")
+    Ok(EntryLocation {
+        page_index: page_index,
+        offset: 0,
+    })
 }
 
 /// Allocate a new byte string in the given page and populate it with the
@@ -229,7 +229,7 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
                 pool: pool,
 
                 is_aliased: true,
-                current_page: page,
+                current_page: &pool[first_entry.page_index],
                 current_entry: first_entry,
                 current_string: get_entry_header(first_entry, pool),
                 alias_index: 0,
@@ -264,11 +264,7 @@ impl <'a> Iterator for ByteStringIter<'a> {
     type Item = &'a u8;
 
     fn next(&mut self) -> Option<&'a u8> {
-        let current_byte = &self.current_page
-            [self.current_entry.offset+*BSE_HEADER_SIZE+self.byte_index];
-
-        // Increment our count, and roll over if necessary
-        self.byte_index += 1;
+        // Roll over if necessary
         if self.byte_index >= self.current_string.contents_size {
             if self.is_aliased {
                 self.alias_index += 1;
@@ -285,8 +281,55 @@ impl <'a> Iterator for ByteStringIter<'a> {
                 return None
             }
         }
+        let current_byte = &self.current_page
+            [self.current_entry.offset+*BSE_HEADER_SIZE+self.byte_index];
+        self.byte_index += 1;
         Some(current_byte)
     }
+}
+
+#[test]
+fn test_alias_alloc_with_contents() {
+    let mut buf = [0u8; 0x5100];
+    let pool = Pool::new(&mut buf);
+
+    // Should take up 4 pages
+    let test_contents = [42u8; 0x3000];
+    assert_eq!(4, calc_num_chunks(test_contents.len()));
+
+    let alias_loc = alias_alloc_with_contents(&test_contents[..], &pool).unwrap();
+    let alias_header = get_entry_header(&alias_loc, &pool);
+
+    assert_eq!(4, alias_header.contents_size);
+    assert_eq!(MemType::Alias, alias_header.entry_type);
+
+    let chunk1 = pool[1].transmute_page::<ByteStringEntry>();
+    assert_eq!(MemType::Entry, chunk1.entry_type);
+    assert_eq!(*BSE_CHUNK_SIZE, chunk1.contents_size);
+
+    let chunk2 = pool[2].transmute_page::<ByteStringEntry>();
+    assert_eq!(MemType::Entry, chunk2.entry_type);
+    assert_eq!(*BSE_CHUNK_SIZE, chunk2.contents_size);
+
+    let chunk3 = pool[3].transmute_page::<ByteStringEntry>();
+    assert_eq!(MemType::Entry, chunk3.entry_type);
+    assert_eq!(*BSE_CHUNK_SIZE, chunk3.contents_size);
+
+    let chunk4 = pool[4].transmute_page::<ByteStringEntry>();
+    assert_eq!(MemType::Entry, chunk4.entry_type);
+    assert_eq!(48, chunk4.contents_size); // spillover
+
+    for u in get_iter(&alias_loc, &pool) {
+        assert_eq!(42u8, *u);
+    }
+
+    let count = get_iter(&alias_loc, &pool).count();
+    assert_eq!(0x3000, count);
+    assert_eq!(*PAGE_SIZE*3, count);
+
+    // Test error case
+    assert_eq!(Err("OOM"),
+        alias_alloc_with_contents(&test_contents[..], &pool));
 }
 
 #[test]
