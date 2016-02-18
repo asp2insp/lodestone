@@ -75,7 +75,8 @@ impl Pool {
     /// Try to allocate a new item from the pool.
     /// A mutable reference to the item is returned on success
     pub fn alloc(&self) -> Result<PageIndex, &'static str> {
-        let index = try!(self.internal_alloc());
+        let index = try!(self.claim_free_index());
+        self.zero_page(index);
         Ok(index)
     }
 
@@ -123,12 +124,6 @@ impl Pool {
         Ok(index)
     }
 
-    // Internal alloc that does not create an Arc but still claims a slot
-    fn internal_alloc(&self) -> Result<PageIndex, &'static str> {
-        let index = try!(self.claim_free_index());
-        Ok(index)
-    }
-
     // Pushes the end of the used space in the buffer back
     // returns the previous index
     fn push_back_alloc(&self) -> Result<PageIndex, &'static str> {
@@ -153,6 +148,17 @@ impl Pool {
             self.buffer.clone()
                 .offset((i * self.slot_size) as isize)
                 .offset(self.header_size as isize)
+        }
+    }
+
+    fn zero_page(&self, page_index: PageIndex) {
+        unsafe {
+            let mut i = self.raw_contents_for(page_index);
+            let end = i.clone().offset(mem::size_of::<Page>() as isize);
+            while i != end {
+                *i = 0u8;
+                i = i.offset(1);
+            }
         }
     }
 }
@@ -187,10 +193,10 @@ fn release_frees() {
        let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
        let p = Pool::new(&mut buf[..]);
 
-       // Use internal_alloc so that the Arc doesn't drop
+       // Use claim_free_index so that the Arc doesn't drop
        // the reference immediately
-       assert!(p.internal_alloc().is_ok());
-       assert!(p.internal_alloc().is_ok());
+       assert!(p.claim_free_index().is_ok());
+       assert!(p.claim_free_index().is_ok());
 
        assert_eq!(2, p.live_count());
 
@@ -208,7 +214,7 @@ fn release_frees() {
 fn alloc_after_free_recycles() {
        let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
        let p = Pool::new(&mut buf[..]);
-       assert!(p.internal_alloc().is_ok());
+       assert!(p.claim_free_index().is_ok());
        assert_eq!(1, p.live_count());
        assert_eq!(1, p.tail.load(Ordering::Relaxed));
 
@@ -216,7 +222,7 @@ fn alloc_after_free_recycles() {
        assert_eq!(0, p.live_count());
        assert_eq!(1, p.free_list.borrow().len());
 
-       assert!(p.internal_alloc().is_ok());
+       assert!(p.claim_free_index().is_ok());
        assert_eq!(1, p.tail.load(Ordering::Relaxed)); // Tail shouldn't move
        assert_eq!(1, p.live_count());
        assert_eq!(0, p.free_list.borrow().len());
