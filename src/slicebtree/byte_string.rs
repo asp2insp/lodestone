@@ -1,6 +1,7 @@
 use std::{mem, slice, cmp, ptr};
 use allocator::*;
 
+use super::*;
 use super::entry_location::*;
 
 
@@ -50,7 +51,7 @@ pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[Ent
     let header = get_entry_header(entry, pool);
     assert_eq!(MemType::Alias, header.entry_type);
 
-    let start = entry.offset + mem::size_of::<ByteStringEntry>();
+    let start = entry.offset + *BSE_HEADER_SIZE;
     let start_ptr: *const u8 = &pool[entry.page_index][start];
 
     unsafe {
@@ -61,8 +62,8 @@ pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[Ent
 
 #[inline]
 fn calc_num_chunks(size: usize) -> usize {
-    let spill = if size % mem::size_of::<Page>() == 0 {0} else {1};
-    size / mem::size_of::<Page>() + spill
+    let spill = if size % *PAGE_SIZE == 0 {0} else {1};
+    size / *PAGE_SIZE + spill
 }
 
 /// Allocate a new byte string and populate it with the
@@ -71,18 +72,18 @@ fn calc_num_chunks(size: usize) -> usize {
 pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
     let page = &pool[page_hint];
     let offset = next_free_offset(page);
-    let header_size = mem::size_of::<ByteStringEntry>();
-    let free_space = mem::size_of::<Page>() - offset;
+    let header_size = *BSE_HEADER_SIZE;
+    let free_space = *PAGE_SIZE - offset;
 
     let required_space = header_size + contents.len();
 
     // Check to see if we can append to the given page.
-    if mem::size_of::<Page>() - offset >= header_size + contents.len() {
+    if free_space >= header_size + contents.len() {
         append_to_with_contents(page_hint, contents, pool)
-    } else if required_space > mem::size_of::<Page>() {
+    } else if required_space > *PAGE_SIZE {
         let num_chunks = calc_num_chunks(contents.len());
 
-        let alias_header = alias_alloc_with_contents(contents, pool);
+        // let alias_header = alias_alloc_with_contents(contents, pool);
 
         if free_space >= header_size { // if we can, at least put the alias in
 
@@ -93,7 +94,7 @@ pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Re
             offset: offset,
         })
     } else {
-
+        Err("Not implemented")
     }
 }
 
@@ -103,10 +104,10 @@ pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Re
 pub fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
     let page = &pool[page_index];
     let offset = next_free_offset(page);
-    let header_size = mem::size_of::<ByteStringEntry>();
+    let free_space = *PAGE_SIZE - offset;
 
     // TODO add support for aliasing memory
-    if mem::size_of::<Page>() - offset < header_size + contents.len() {
+    if free_space < *BSE_HEADER_SIZE + contents.len() {
         Err("Not enough room")
     } else {
         let mut header = page.transmute_segment_mut::<ByteStringEntry>(offset);
@@ -114,7 +115,7 @@ pub fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) 
         header.contents_size = contents.len();
 
         unsafe {
-            let to = &mut page.borrow_mut()[offset+header_size] as *mut u8;
+            let to = &mut page.borrow_mut()[offset+*BSE_HEADER_SIZE] as *mut u8;
             let from = contents.as_ptr();
             ptr::copy_nonoverlapping(from, to, contents.len());
         }
@@ -128,7 +129,7 @@ pub fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) 
 // Treat the given page as a set of nodes, return the remaining
 // free space in the page.
 pub fn free_space_entry_page(page: &Page) -> usize {
-    mem::size_of::<Page>() - next_free_offset(page)
+    *PAGE_SIZE - next_free_offset(page)
 }
 
 // Find the index of the start of free space
@@ -138,7 +139,7 @@ pub fn next_free_offset(page: &Page) -> usize {
         let header = page.transmute_segment::<ByteStringEntry>(offset);
         match header.entry_type {
             MemType::Entry | MemType::Alias | MemType::Deleted => {
-                offset += mem::size_of::<ByteStringEntry>() + header.contents_size;
+                offset += *BSE_HEADER_SIZE + header.contents_size;
             },
             _ => break,
         }
@@ -152,7 +153,7 @@ pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
     let header = get_entry_header(entry, pool);
     assert_eq!(MemType::Entry, header.entry_type);
 
-    let start = entry.offset + mem::size_of::<ByteStringEntry>();
+    let start = entry.offset + *BSE_HEADER_SIZE;
     &pool[entry.page_index][start..start+header.contents_size]
 }
 
@@ -162,7 +163,7 @@ pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] 
     let header = get_entry_header(entry, pool);
     assert_eq!(MemType::Entry, header.entry_type);
 
-    let start = entry.offset + mem::size_of::<ByteStringEntry>();
+    let start = entry.offset + *BSE_HEADER_SIZE;
 
     let page: &mut Page = pool[entry.page_index].borrow_mut();
     &mut page[start..start+header.contents_size]
@@ -229,7 +230,7 @@ impl <'a> Iterator for ByteStringIter<'a> {
 
     fn next(&mut self) -> Option<&'a u8> {
         let current_byte = &self.current_page
-            [self.current_entry.offset+mem::size_of::<ByteStringEntry>()+self.byte_index];
+            [self.current_entry.offset+*BSE_HEADER_SIZE+self.byte_index];
 
         // Increment our count, and roll over if necessary
         self.byte_index += 1;
@@ -262,12 +263,12 @@ fn test_append_to_with_contents() {
     let page = &pool[page_index];
 
     for i in 0..10 {
-        let remaining_space = mem::size_of::<Page>() - 20*i;
+        let remaining_space = *PAGE_SIZE - 20*i;
 
         assert_eq!(remaining_space, free_space_entry_page(page));
         assert_eq!(20*i, next_free_offset(page));
 
-        let loc = alloc_with_contents(page_index, &[1u8, 2u8, 3u8, 4u8][..], &pool).unwrap();
+        let loc = append_to_with_contents(page_index, &[1u8, 2u8, 3u8, 4u8][..], &pool).unwrap();
         let entry = get_entry_header(&loc, &pool);
 
         assert_eq!(20*i, loc.offset);
@@ -281,38 +282,7 @@ fn test_append_to_with_contents() {
 
     // Test error case
     assert_eq!(Err("Not enough room"),
-        alloc_with_contents(page_index, &[42u8; 4097][..], &pool));
-}
-
-#[test]
-fn test_append_to_with_contents() {
-    let mut buf = [0u8; 0x1100];
-    let pool = Pool::new(&mut buf);
-
-    let page_index = pool.alloc().unwrap();
-    let page = &pool[page_index];
-
-    for i in 0..10 {
-        let remaining_space = mem::size_of::<Page>() - 20*i;
-
-        assert_eq!(remaining_space, free_space_entry_page(page));
-        assert_eq!(20*i, next_free_offset(page));
-
-        let loc = alloc_with_contents(page_index, &[1u8, 2u8, 3u8, 4u8][..], &pool).unwrap();
-        let entry = get_entry_header(&loc, &pool);
-
-        assert_eq!(20*i, loc.offset);
-        assert_eq!(page_index, loc.page_index);
-        assert_eq!(4, entry.contents_size);
-
-        assert_eq!([1u8, 2u8, 3u8, 4u8][..], *get_slice(&loc, &pool));
-    }
-
-    assert_eq!(3896, free_space_entry_page(page));
-
-    // Test error case
-    assert_eq!(Err("Not enough room"),
-        alloc_with_contents(page_index, &[42u8; 4097][..], &pool));
+        append_to_with_contents(page_index, &[42u8; 4097][..], &pool));
 }
 
 #[test]
@@ -328,7 +298,7 @@ fn test_free_space_entry_page() {
     };
 
     for i in 0..10 {
-        let remaining_space = mem::size_of::<Page>() - 36*i;
+        let remaining_space = *PAGE_SIZE - 36*i;
         assert_eq!(remaining_space, free_space_entry_page(page));
         assert_eq!(36*i, next_free_offset(page));
 

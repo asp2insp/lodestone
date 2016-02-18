@@ -113,6 +113,6 @@ pub fn free_space_node_page(_: &Page) -> usize {
 
 #[test]
 fn test_invariants() {
-    println!("CHECK {:?} < {:?}?", mem::size_of::<NodeHeader>(), mem::size_of::<Page>());
-    assert!(mem::size_of::<NodeHeader>() < mem::size_of::<Page>());
+    println!("CHECK {:?} < {:?}?", mem::size_of::<NodeHeader>(), *PAGE_SIZE);
+    assert!(mem::size_of::<NodeHeader>() < *PAGE_SIZE);
 }

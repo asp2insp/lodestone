@@ -2,7 +2,7 @@
 /// Supports MVCC up to 2 revisions
 /// Lives entirely within the slice that is given to it.
 /// Keys and Values are byte slices.
-
+use std::mem;
 use self::node::*;
 use self::entry_location::*;
 use self::byte_string::*;
@@ -15,6 +15,11 @@ pub mod entry_location;
 
 pub const N: usize = 2;
 pub const B: usize = 100;
+lazy_static! {
+    pub static ref PAGE_SIZE: usize = mem::size_of::<Page>();
+    pub static ref BSE_HEADER_SIZE: usize = mem::size_of::<ByteStringEntry>();
+    pub static ref BSE_CHUNK_SIZE: usize = *PAGE_SIZE - *BSE_HEADER_SIZE;
+}
 
 /// Maps arbitrary [u8] to [u8].
 /// One value per key
@@ -60,6 +65,16 @@ impl BTree {
 
 }
 
+// pub struct Context {
+//     tx_id: usize,
+//     pool: &Pool,
+// }
+//
+// pub trait Node {
+//     fn insert(key: &[u8], value: &[u8]) {
+//
+//     }
+// }
 
 
 /// Return the amount of free space left in a given page

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
-extern crate zero;
+#[macro_use]
+extern crate lazy_static;
 
 mod allocator;
 
