@@ -19,6 +19,7 @@ lazy_static! {
     pub static ref PAGE_SIZE: usize = mem::size_of::<Page>();
     pub static ref BSE_HEADER_SIZE: usize = mem::size_of::<ByteStringEntry>();
     pub static ref BSE_CHUNK_SIZE: usize = *PAGE_SIZE - *BSE_HEADER_SIZE;
+    pub static ref EL_PTR_SIZE: usize = mem::size_of::<EntryLocation>();
 }
 
 /// Maps arbitrary [u8] to [u8].

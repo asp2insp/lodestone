@@ -16,6 +16,22 @@ pub struct ByteStringEntry {
     // contents_size bytes of data
 }
 
+impl ByteStringEntry {
+    pub fn size_on_disk(&self) -> usize {
+        match self.entry_type {
+            MemType::Entry => {
+                *BSE_HEADER_SIZE + self.contents_size
+            },
+            MemType::Alias => {
+                *BSE_HEADER_SIZE + self.contents_size * *EL_PTR_SIZE
+            },
+            _ => {
+                panic!("size_on_disk called on non-disk entry")
+            }
+        }
+    }
+}
+
 // Lexicographically compare the entries pointed to by e1 and e2
 pub fn cmp(e1: &EntryLocation, e2: &EntryLocation, p: &Pool) -> cmp::Ordering {
     get_iter(e1, p).cmp(get_iter(e2, p))
@@ -80,22 +96,42 @@ pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Re
     // Check to see if we can append to the given page.
     if free_space >= header_size + contents.len() {
         append_to_with_contents(page_hint, contents, pool)
-    } else if required_space > *PAGE_SIZE {
-        let num_chunks = calc_num_chunks(contents.len());
-
-        // let alias_header = alias_alloc_with_contents(contents, pool);
-
-        if free_space >= header_size { // if we can, at least put the alias in
-
-        }
-
-        Ok(EntryLocation {
-            page_index: page_hint,
-            offset: offset,
-        })
     } else {
-        Err("Not implemented")
+        alias_alloc_with_contents(contents, pool)
     }
+}
+
+/// Allocate a new byte string that requires aliasing and populate it with the
+/// given contents. Returns Ok if the operation succeeded and Err if the
+/// allocation failed
+pub fn alias_alloc_with_contents(contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
+    let num_chunks = calc_num_chunks(contents.len());
+
+    let page_index = try!(pool.alloc());
+    let page = &pool[page_index];
+    let mut alias_header = page.transmute_page_mut::<ByteStringEntry>();
+    alias_header.entry_type = MemType::Alias;
+    alias_header.contents_size = num_chunks;
+
+    let mut offset = *BSE_HEADER_SIZE;
+    let mut contents_offset = 0;
+    for _ in 0..(num_chunks-1) {
+        let index = try!(pool.alloc());
+        let mut next = contents_offset + *BSE_CHUNK_SIZE;
+        if next > contents.len() {
+            next = contents.len();
+        }
+        let loc = try!(append_to_with_contents(index,
+            &contents[contents_offset..next],
+            pool));
+        let mut el_ptr = page.transmute_segment_mut::<EntryLocation>(offset);
+        el_ptr.page_index = loc.page_index;
+        el_ptr.offset = loc.offset;
+        
+        contents_offset = next;
+        offset += *EL_PTR_SIZE;
+    }
+    Err("")
 }
 
 /// Allocate a new byte string in the given page and populate it with the
@@ -106,7 +142,6 @@ pub fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) 
     let offset = next_free_offset(page);
     let free_space = *PAGE_SIZE - offset;
 
-    // TODO add support for aliasing memory
     if free_space < *BSE_HEADER_SIZE + contents.len() {
         Err("Not enough room")
     } else {
@@ -139,7 +174,7 @@ pub fn next_free_offset(page: &Page) -> usize {
         let header = page.transmute_segment::<ByteStringEntry>(offset);
         match header.entry_type {
             MemType::Entry | MemType::Alias | MemType::Deleted => {
-                offset += *BSE_HEADER_SIZE + header.contents_size;
+                offset += header.size_on_disk();
             },
             _ => break,
         }
