@@ -333,6 +333,24 @@ fn test_alias_alloc_with_contents() {
 }
 
 #[test]
+fn test_alias_alloc_then_free() {
+    let mut buf = [0u8; 0x5100];
+    let pool = Pool::new(&mut buf);
+
+    // Should take up 4 pages
+    let test_contents = [42u8; 0x3000];
+    assert_eq!(4, calc_num_chunks(test_contents.len()));
+
+    let alias_loc = alias_alloc_with_contents(&test_contents[..], &pool).unwrap();
+
+    // This should be the only reference on the memory
+    release_byte_string(&alias_loc, &pool);
+
+    // So we should be able to reclaim it
+    assert!(alias_alloc_with_contents(&test_contents[..], &pool).is_ok());
+}
+
+#[test]
 fn test_append_to_with_contents() {
     let mut buf = [0u8; 0x1100];
     let pool = Pool::new(&mut buf);
