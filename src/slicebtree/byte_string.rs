@@ -4,6 +4,7 @@ use allocator::*;
 use super::*;
 use super::entry_location::*;
 
+pub const NO_HINT: usize = 0xFFFFFFFF;
 
 /// If the entry is an alias, contents_size is the number
 /// of segments in the alias. If it's an entry, contents_size
@@ -86,15 +87,22 @@ fn calc_num_chunks(size: usize) -> usize {
 /// given contents. Returns Ok if the operation succeeded and Err if the
 /// allocation failed
 pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
-    let page = &pool[page_hint];
-    let offset = next_free_offset(page);
-    let free_space = *PAGE_SIZE - offset;
-    let required_space = *BSE_HEADER_SIZE + contents.len();
-    // Check to see if we can append to the given page.
-    if free_space >= required_space {
-        append_to_with_contents(page_hint, contents, pool)
-    } else {
+    if page_hint != NO_HINT {
+        let page = &pool[page_hint];
+        let offset = next_free_offset(page);
+        let free_space = *PAGE_SIZE - offset;
+        let required_space = *BSE_HEADER_SIZE + contents.len();
+        // Check to see if we can append to the given page.
+        if free_space >= required_space {
+            return append_to_with_contents(page_hint, contents, pool)
+        }
+    }
+    // go for a new page
+    if contents.len() > *BSE_CHUNK_SIZE {
         alias_alloc_with_contents(contents, pool)
+    } else {
+        let index = try!(pool.alloc());
+        append_to_with_contents(index, contents, pool)
     }
 }
 
@@ -240,7 +248,7 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
             panic!("get_iter called on a deleted entry");
         },
         _ => {
-            panic!("get_iter called on a Node instead of an entry");
+            panic!("get_iter called on a Node instead of an entry: {:?}", entry);
         },
     }
 }
