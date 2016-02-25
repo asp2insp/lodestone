@@ -15,10 +15,10 @@ pub mod entry_location;
 
 pub const N: usize = 2;
 pub const B: usize = 100;
+pub const NOT_FOUND: usize = B+1;
 lazy_static! {
-    pub static ref PAGE_SIZE: usize = mem::size_of::<Page>();
     pub static ref BSE_HEADER_SIZE: usize = mem::size_of::<ByteStringEntry>();
-    pub static ref BSE_CHUNK_SIZE: usize = *PAGE_SIZE - *BSE_HEADER_SIZE;
+    pub static ref BSE_CHUNK_SIZE: usize = PAGE_SIZE - *BSE_HEADER_SIZE;
     pub static ref EL_PTR_SIZE: usize = mem::size_of::<EntryLocation>();
 }
 

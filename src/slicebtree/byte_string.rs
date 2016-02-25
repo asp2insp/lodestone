@@ -1,4 +1,4 @@
-use std::{mem, slice, cmp, ptr};
+use std::{mem, slice, cmp, ptr, str};
 use allocator::*;
 
 use super::*;
@@ -90,7 +90,7 @@ pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Re
     if page_hint != NO_HINT {
         let page = &pool[page_hint];
         let offset = next_free_offset(page);
-        let free_space = *PAGE_SIZE - offset;
+        let free_space = PAGE_SIZE - offset;
         let required_space = *BSE_HEADER_SIZE + contents.len();
         // Check to see if we can append to the given page.
         if free_space >= required_space {
@@ -148,7 +148,7 @@ pub fn alias_alloc_with_contents(contents: &[u8], pool: &Pool) -> Result<EntryLo
 pub fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
     let page = &pool[page_index];
     let offset = next_free_offset(page);
-    let free_space = *PAGE_SIZE - offset;
+    let free_space = PAGE_SIZE - offset;
 
     if free_space < *BSE_HEADER_SIZE + contents.len() {
         Err("Not enough room")
@@ -172,7 +172,7 @@ pub fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) 
 // Treat the given page as a set of nodes, return the remaining
 // free space in the page.
 pub fn free_space_entry_page(page: &Page) -> usize {
-    *PAGE_SIZE - next_free_offset(page)
+    PAGE_SIZE - next_free_offset(page)
 }
 
 // Find the index of the start of free space
@@ -325,7 +325,7 @@ fn test_alias_alloc_with_contents() {
 
     let chunk4 = pool[4].transmute_page::<ByteStringEntry>();
     assert_eq!(MemType::Entry, chunk4.entry_type);
-    assert_eq!(48, chunk4.contents_size); // spillover
+    assert_eq!(72, chunk4.contents_size); // spillover
 
     for u in get_iter(&alias_loc, &pool) {
         assert_eq!(42u8, *u);
@@ -333,7 +333,6 @@ fn test_alias_alloc_with_contents() {
 
     let count = get_iter(&alias_loc, &pool).count();
     assert_eq!(0x3000, count);
-    assert_eq!(*PAGE_SIZE*3, count);
 
     // Test error case
     assert_eq!(Err("OOM"),
@@ -367,7 +366,7 @@ fn test_append_to_with_contents() {
     let page = &pool[page_index];
 
     for i in 0..10 {
-        let remaining_space = *PAGE_SIZE - 20*i;
+        let remaining_space = PAGE_SIZE - 20*i;
 
         assert_eq!(remaining_space, free_space_entry_page(page));
         assert_eq!(20*i, next_free_offset(page));
@@ -382,7 +381,7 @@ fn test_append_to_with_contents() {
         assert_eq!([1u8, 2u8, 3u8, 4u8][..], *get_slice(&loc, &pool));
     }
 
-    assert_eq!(3896, free_space_entry_page(page));
+    assert_eq!(3888, free_space_entry_page(page));
 
     // Test error case
     assert_eq!(Err("Not enough room"),
@@ -402,7 +401,7 @@ fn test_free_space_entry_page() {
     };
 
     for i in 0..10 {
-        let remaining_space = *PAGE_SIZE - 36*i;
+        let remaining_space = PAGE_SIZE - 36*i;
         assert_eq!(remaining_space, free_space_entry_page(page));
         assert_eq!(36*i, next_free_offset(page));
 
@@ -413,7 +412,7 @@ fn test_free_space_entry_page() {
         loc.offset += 36;
     }
 
-    assert_eq!(3736, free_space_entry_page(page));
+    assert_eq!(3728, free_space_entry_page(page));
 }
 
 #[test]

@@ -1,7 +1,8 @@
 use std::mem;
 
-/// Each page is 4096 bytes
-pub type Page = [u8; 0x1000];
+/// Each page is 4088 bytes so that slot size is 4k
+pub const PAGE_SIZE: usize = 0x1000 - 8;
+pub type Page = [u8; PAGE_SIZE];
 
 pub type PageIndex = usize;
 
@@ -66,7 +67,7 @@ fn test_transmute_whole() {
         unsigned: usize,
     }
 
-    let p = [0u8; 0x1000];
+    let p = [0u8; PAGE_SIZE];
     {
         let c = p.transmute_page_mut::<Composite>();
         c.signed = -17;
@@ -85,7 +86,7 @@ fn test_transmute_part() {
         unsigned: usize,
     }
 
-    let p = [0u8; 0x1000];
+    let p = [0u8; PAGE_SIZE];
     {
         let c = p.transmute_segment_mut::<Composite>(64);
         c.signed = -17;

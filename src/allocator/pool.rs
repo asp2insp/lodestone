@@ -239,19 +239,19 @@ fn construction() {
     let expected_size = mem::size_of::<usize>() + mem::size_of::<Page>();
     assert_eq!(expected_size, p.slot_size);
     assert_eq!(5*0x1000/expected_size, p.capacity); // expected_size should be 8+4096=4104
-    assert_eq!(4, p.capacity);
+    assert_eq!(5, p.capacity);
 }
 
 #[test]
 fn free_list_alloc_works() {
     let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
     let mut p = Pool::new(&mut buf[..]);
-    let forty_two = [42u8; 4096];
+    let forty_two = [42u8; PAGE_SIZE];
     {
         let int1 = p.alloc().unwrap();
         p[int1] = forty_two;
         // Check payload
-        assert_eq!(forty_two[..], buf[8..4104]);
+        assert_eq!(forty_two[..], buf[8..4096]);
         // Check ref_count
         assert_eq!([1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8][..], buf[0..8]);
         assert_eq!(1, p.live_count());
@@ -275,7 +275,7 @@ fn multiple_allocations_work() {
    assert_eq!(10, p.live_count());
    let expected_ref_count = [1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8];
    for i in 0..10 {
-       let start = 4104*i;
+       let start = 4096*i;
        // Check ref_count
        assert_eq!(expected_ref_count[..], buf[start..start+8]);
     }

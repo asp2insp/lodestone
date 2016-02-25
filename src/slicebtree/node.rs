@@ -6,6 +6,7 @@ use super::entry_location::*;
 use super::byte_string::*;
 
 
+/// TODO: revise this
 /// The Node exposes a mutable API. Immutability/Append only
 /// is left to the wrapping tree implementation
 
@@ -28,6 +29,7 @@ pub struct NodeHeader {
     children: [EntryLocation; B],
 }
 
+/// Public interface
 impl NodeHeader {
     pub fn from_entry<'a>(e: &EntryLocation, pool: &'a Pool) -> &'a mut NodeHeader {
         pool[e.page_index].borrow_mut().transmute_page_mut::<NodeHeader>()
@@ -43,29 +45,8 @@ impl NodeHeader {
     }
 }
 
+/// Private interface
 impl NodeHeader {
-    /// Insert in an append only/immutable fashion
-    fn leaf_node_insert_non_full(&mut self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
-        let page_hint = if self.num_keys > 0 {
-            get_page_hint(&self.keys, self.num_keys-1)
-        } else {
-            NO_HINT
-        };
-        let key_loc = try!(alloc_with_contents(page_hint, key, pool));
-
-        let page_hint = if self.num_children > 0 {
-            get_page_hint(&self.children, self.num_children-1)
-        } else {
-            NO_HINT
-        };
-        let val_loc = try!(alloc_with_contents(page_hint, value, pool));
-
-        let loc = try!(self.clone(tx_id, pool));
-        let node = NodeHeader::from_entry(&loc, pool);
-        insert_child_non_full(node, &key_loc, &val_loc, pool);
-        Ok(loc)
-    }
-
     fn clone(&self, tx_id: usize, pool: &Pool) -> Result<EntryLocation, &'static str> {
         let loc = EntryLocation {
             page_index: try!(pool.alloc()),
@@ -89,8 +70,40 @@ impl NodeHeader {
     }
 }
 
+/// Leaf node specific functions
+impl NodeHeader {
+    /// Insert in an append only/immutable fashion
+    fn leaf_node_insert_non_full(&mut self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
+        assert_eq!(MemType::Leaf, self.node_type);
+        let page_hint = if self.num_keys > 0 {
+            get_page_hint(&self.keys, self.num_keys-1)
+        } else {
+            NO_HINT
+        };
+        let key_loc = try!(alloc_with_contents(page_hint, key, pool));
+
+        let page_hint = if self.num_children > 0 {
+            get_page_hint(&self.children, self.num_children-1)
+        } else {
+            NO_HINT
+        };
+        let val_loc = try!(alloc_with_contents(page_hint, value, pool));
+
+        let loc = try!(self.clone(tx_id, pool));
+        let node = NodeHeader::from_entry(&loc, pool);
+        insert_child_non_full(node, &key_loc, &val_loc, pool);
+        Ok(loc)
+    }
+
+    fn leaf_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
+        assert_eq!(MemType::Leaf, self.node_type);
+        index_of(self, key, pool) != NOT_FOUND
+    }
+}
+
 /// Return the page where the last item points as a hint
 /// for where the next item should be allocated.
+#[inline]
 fn get_page_hint(array: &[EntryLocation; B], last_index: usize) -> usize {
     array[last_index].page_index
 }
@@ -117,6 +130,39 @@ fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) ->
         i = bottom + (top + bottom)/2;
     }
     i
+}
+
+/// Binary search impl for finding the location of the given key.
+/// Returns NOT_FOUND if the given key does not exist in the node
+fn index_of(n: &NodeHeader, key: &[u8], pool: &Pool) -> usize {
+    if n.num_keys == 0 {
+        return NOT_FOUND
+    }
+    let mut top = n.num_keys;
+    let mut bottom = 0;
+    let mut i = top/2;
+    let mut old_i = i;
+    loop {
+        match key.iter().cmp(get_iter(&n.keys[i], pool)) {
+            cmp::Ordering::Equal => break,
+            cmp::Ordering::Less => top = i,
+            cmp::Ordering::Greater => bottom = i,
+        }
+        if top < bottom {
+            break;
+        }
+        i = bottom + (top + bottom)/2;
+        if i == old_i {
+            break;
+        } else {
+            old_i = i;
+        }
+    }
+    if key.iter().cmp(get_iter(&n.keys[i], pool)) == cmp::Ordering::Equal {
+        i
+    } else {
+        NOT_FOUND
+    }
 }
 
 /// Internal nodes have keys in order. The corresponding
@@ -187,6 +233,41 @@ pub fn free_space_node_page(_: &Page) -> usize {
     0 // Nodes are designed to fill an entire page
 }
 
+// #[test]
+fn test_insertion_ordering() {
+    let mut buf = [0u8; 0x6400];
+    let pool = Pool::new(&mut buf);
+    let n = pool.alloc().unwrap();
+    let n = EntryLocation {
+        page_index: n,
+        offset: 0,
+    };
+    let key: Vec<u8> = "hello".bytes().collect();
+    let value: Vec<u8> = "world".bytes().collect();
+
+    let key2: Vec<u8> = "foo".bytes().collect();
+    let value2: Vec<u8> = "bar".bytes().collect();
+
+    let n = NodeHeader::from_entry(&n, &pool);
+    n.init(0, MemType::Leaf);
+
+    let n2 = n.leaf_node_insert_non_full(1, &key[..], &value[..], &pool).unwrap();
+    let n2 = NodeHeader::from_entry(&n2, &pool);
+
+    let n3 = n2.leaf_node_insert_non_full(1, &key2[..], &value2[..], &pool).unwrap();
+    let n3 = NodeHeader::from_entry(&n3, &pool);
+
+    assert_eq!(2, n3.num_keys);
+    assert_eq!(2, n3.num_children);
+
+    assert!(n3.leaf_node_contains_key(&key[..], &pool));
+    assert!(n3.leaf_node_contains_key(&key2[..], &pool));
+
+    // "foo" should sort first before "hello"
+    assert_eq!(0, index_of(n3, &key2[..], &pool));
+    assert_eq!(1, index_of(n3, &key[..], &pool));
+}
+
 #[test]
 fn test_insert_internal_non_full() {
     let mut buf = [0u8; 0x6100];
@@ -214,10 +295,13 @@ fn test_insert_internal_non_full() {
 
     assert_eq!(&key[..], get_slice(&n2.keys[0], &pool));
     assert_eq!(&value[..], get_slice(&n2.children[0], &pool));
+
+    assert!(n2.leaf_node_contains_key(&key[..], &pool));
+    assert!(!n.leaf_node_contains_key(&key[..], &pool));
 }
 
 #[test]
 fn test_invariants() {
-    println!("CHECK {:?} < {:?}?", mem::size_of::<NodeHeader>(), *PAGE_SIZE);
-    assert!(mem::size_of::<NodeHeader>() < *PAGE_SIZE);
+    println!("CHECK {:?} < {:?}?", mem::size_of::<NodeHeader>(), PAGE_SIZE);
+    assert!(mem::size_of::<NodeHeader>() < PAGE_SIZE);
 }
