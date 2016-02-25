@@ -117,6 +117,7 @@ fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) ->
     let mut top = n.num_keys;
     let mut bottom = 0;
     let mut i = top/2;
+    let mut old_i = i;
 
     loop {
         match cmp(key_loc, &n.keys[i], pool) {
@@ -128,6 +129,11 @@ fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) ->
             break;
         }
         i = bottom + (top + bottom)/2;
+        if i == old_i {
+            break;
+        } else {
+            old_i = i;
+        }
     }
     i
 }
@@ -233,9 +239,9 @@ pub fn free_space_node_page(_: &Page) -> usize {
     0 // Nodes are designed to fill an entire page
 }
 
-// #[test]
+#[test]
 fn test_insertion_ordering() {
-    let mut buf = [0u8; 0x6400];
+    let mut buf = [0u8; 0x5000];
     let pool = Pool::new(&mut buf);
     let n = pool.alloc().unwrap();
     let n = EntryLocation {
@@ -270,7 +276,7 @@ fn test_insertion_ordering() {
 
 #[test]
 fn test_insert_internal_non_full() {
-    let mut buf = [0u8; 0x6100];
+    let mut buf = [0u8; 0x4000];
     let pool = Pool::new(&mut buf);
     let n = pool.alloc().unwrap();
     let n = EntryLocation {
