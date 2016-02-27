@@ -6,7 +6,7 @@ use std::mem;
 use self::node::*;
 use self::entry_location::*;
 use self::byte_string::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize};
 use allocator::*;
 
 pub mod node;

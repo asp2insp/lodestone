@@ -1,4 +1,4 @@
-use std::{mem, slice, cmp, ptr, str};
+use std::{mem, slice, cmp, ptr};
 use allocator::*;
 
 use super::*;
