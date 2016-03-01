@@ -94,7 +94,10 @@ pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Re
         let required_space = *BSE_HEADER_SIZE + contents.len();
         // Check to see if we can append to the given page.
         if free_space >= required_space {
-            return append_to_with_contents(page_hint, contents, pool)
+            let loc = try!(append_to_with_contents(page_hint, contents, pool));
+            // We've created a new EntryLocation, so we need to retain the page
+            pool.retain(loc.page_index);
+            return Ok(loc);
         }
     }
     // go for a new page
@@ -145,7 +148,7 @@ pub fn alias_alloc_with_contents(contents: &[u8], pool: &Pool) -> Result<EntryLo
 /// Allocate a new byte string in the given page and populate it with the
 /// given contents. Returns Ok if the operation succeeded and Err if the
 /// page does not have capacity for the value.
-pub fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
+fn append_to_with_contents(page_index: usize, contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
     let page = &pool[page_index];
     let offset = next_free_offset(page);
     let free_space = PAGE_SIZE - offset;
@@ -352,8 +355,9 @@ fn test_alias_alloc_then_free() {
 
     // This should be the only reference on the memory
     release_byte_string(&alias_loc, &pool);
+    assert_eq!(0, pool.get_ref_count(alias_loc.page_index));
 
-    // So we should be able to reclaim it
+    // So we should be able to re-use the memory it used to hold
     assert!(alias_alloc_with_contents(&test_contents[..], &pool).is_ok());
 }
 

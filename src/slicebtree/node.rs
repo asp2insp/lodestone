@@ -1,4 +1,4 @@
-use std::cmp;
+use std::{cmp,mem};
 use allocator::*;
 
 use super::*;
@@ -62,12 +62,20 @@ impl NodeHeader {
 
         for i in 0..node.num_keys {
             node.keys[i] = self.keys[i].clone();
+            // Retain the page
+            pool.retain(node.keys[i].page_index);
         }
         for i in 0..node.num_children {
             node.children[i] = self.children[i].clone();
+            // Retain the page
+            pool.retain(node.children[i].page_index);
         }
         Ok(loc)
     }
+}
+
+impl NodeHeader {
+
 }
 
 /// Leaf node specific functions
@@ -106,6 +114,25 @@ impl NodeHeader {
             pool: pool,
             index: 0,
         }
+    }
+
+    /// Decrement the ref count for the given node
+    /// Follow keys/children to release all the byte strings
+    fn leaf_node_release(&mut self, pool: &Pool) {
+        // First release the keys and values
+        for el in self.keys.iter() {
+            release_byte_string(el, pool);
+        }
+        for el in self.children.iter() {
+            release_byte_string(el, pool);
+        }
+        // Finally release the node itself
+        // The unsafe call is a performance optimization
+        let page_index = unsafe {
+            let self_ptr = self as *const NodeHeader;
+            pool.calc_page_index(mem::transmute(self_ptr))
+        };
+        pool.release(page_index);
     }
 }
 
@@ -271,6 +298,57 @@ pub fn free_space_node_page(_: &Page) -> usize {
 }
 
 #[test]
+fn test_release_leaf_node() {
+    let mut buf = [0u8; 0x5000];
+    let pool = Pool::new(&mut buf);
+    let page_index_1 = pool.alloc().unwrap();
+    let n = EntryLocation {
+        page_index: page_index_1,
+        offset: 0,
+    };
+    let hello: Vec<u8> = "hello".bytes().collect();
+    let world: Vec<u8> = "world".bytes().collect();
+
+    let foo: Vec<u8> = "foo".bytes().collect();
+    let bar: Vec<u8> = "bar".bytes().collect();
+
+    let n = NodeHeader::from_entry(&n, &pool);
+    n.init(0, MemType::Leaf);
+
+    let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+    let page_index_2 = n2.page_index;
+    let n2 = NodeHeader::from_entry(&n2, &pool);
+
+    let n3 = n2.leaf_node_insert_non_full(1, &foo[..], &bar[..], &pool).unwrap();
+    let page_index_3 = n3.page_index;
+    let n3 = NodeHeader::from_entry(&n3, &pool);
+
+    let keys_page = n3.keys[0].page_index;
+    let children_page = n3.children[0].page_index;
+
+    // Each node should be the only user of its page
+    assert_eq!(1, pool.get_ref_count(page_index_1));
+    assert_eq!(1, pool.get_ref_count(page_index_2));
+    assert_eq!(1, pool.get_ref_count(page_index_3));
+
+    // The keys and refs should each have 3 entries across 2 nodes pointed at them
+    assert_eq!(3, pool.get_ref_count(keys_page));
+    assert_eq!(3, pool.get_ref_count(children_page));
+
+    // Now, we'll free the last node, and watch the ref counts go down
+    n3.leaf_node_release(&pool);
+    assert_eq!(1, pool.get_ref_count(keys_page));
+    assert_eq!(1, pool.get_ref_count(children_page));
+    assert_eq!(0, pool.get_ref_count(page_index_3));
+
+    // Then the other node
+    n2.leaf_node_release(&pool);
+    assert_eq!(0, pool.get_ref_count(keys_page));
+    assert_eq!(0, pool.get_ref_count(children_page));
+    assert_eq!(0, pool.get_ref_count(page_index_2));
+}
+
+#[test]
 fn test_insertion_ordering() {
     use std::iter;
     let mut buf = [0u8; 0x5000];
@@ -352,7 +430,6 @@ fn test_insert_internal_non_full() {
 
 #[test]
 fn test_invariants() {
-    use std::mem;
     println!("CHECK {:?} < {:?}?", mem::size_of::<NodeHeader>(), PAGE_SIZE);
     assert!(mem::size_of::<NodeHeader>() < PAGE_SIZE);
 }

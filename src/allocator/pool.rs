@@ -60,6 +60,13 @@ impl Pool {
         }
     }
 
+    /// Get the reference count for a given page
+    /// Don't use this for anything besides testing. Because
+    /// really. What are you thinking?
+    pub fn get_ref_count(&self, index: PageIndex) -> usize {
+        self.header_for(index).ref_count.load(Ordering::SeqCst)
+    }
+
     /// Fast copy a slot's contents to a new slot and return
     /// a pointer to the new slot
     pub fn alloc_with_contents_of(&self, other: PageIndex) -> Result<PageIndex, &'static str> {
@@ -107,6 +114,22 @@ impl Pool {
     /// Returns the number of live items. O(1) running time.
     pub fn live_count(&self) -> usize {
         self.tail.load(Ordering::SeqCst) - self.free_list.borrow().len()
+    }
+
+    /// Returns the index of the page containing the given pointer
+    /// panics if given a pointer outside of the buffer
+    pub unsafe fn calc_page_index(&self, obj: *const u8) -> usize {
+        let obj_addr = obj as usize;
+        let buf_addr = self.buffer as usize;
+
+        if obj_addr < buf_addr {
+            panic!("calc_page_index called with address below start of buffer!");
+        }
+        let offset = obj_addr - buf_addr;
+        if offset > self.buffer_size {
+            panic!("calc_page_index called with address past end of buffer!");
+        }
+        offset / self.slot_size
     }
 }
 
