@@ -72,8 +72,42 @@ impl NodeHeader {
         }
         Ok(loc)
     }
+
+    /// Binary search impl for finding the location of the given key.
+    /// Returns NOT_FOUND if the given key does not exist in the node
+    fn index_of(&self, key: &[u8], pool: &Pool) -> usize {
+        if self.num_keys == 0 {
+            return NOT_FOUND
+        }
+        let mut top = self.num_keys;
+        let mut bottom = 0;
+        let mut i = top/2;
+        let mut old_i = i;
+        loop {
+            match key.iter().cmp(get_iter(&self.keys[i], pool)) {
+                cmp::Ordering::Equal => break,
+                cmp::Ordering::Less => top = i,
+                cmp::Ordering::Greater => bottom = i,
+            }
+            if top < bottom {
+                break;
+            }
+            i = bottom + (top + bottom)/2;
+            if i == old_i {
+                break;
+            } else {
+                old_i = i;
+            }
+        }
+        if key.iter().cmp(get_iter(&self.keys[i], pool)) == cmp::Ordering::Equal {
+            i
+        } else {
+            NOT_FOUND
+        }
+    }
 }
 
+/// Internal node specific functions
 impl NodeHeader {
 
 }
@@ -103,9 +137,46 @@ impl NodeHeader {
         Ok(loc)
     }
 
+    /// Remove in an append-only/immutable fashion.
+    /// Precondition: key must exist. Panics if key does not exist
+    fn leaf_node_remove(&mut self, tx_id: usize, key: &[u8], pool:&Pool) -> Result<EntryLocation, &'static str> {
+        assert_eq!(MemType::Leaf, self.node_type);
+        let index = self.index_of(key, pool);
+        if index == NOT_FOUND {
+            panic!("The caller is responsible for checking for key existence before calling remove");
+        }
+        let loc = EntryLocation {
+            page_index: try!(pool.alloc()),
+            offset: 0,
+        };
+        let node = NodeHeader::from_entry(&loc, pool);
+
+        // Copy over metadata
+        node.node_type = self.node_type.clone();
+        node.tx_id = tx_id;
+        node.num_keys = self.num_keys-1;
+        node.num_children = self.num_children-1;
+
+        // Copy all data except for the deleted key/val
+        let mut off = 0;
+        for i in 0..self.num_keys {
+            if i == index {
+                off = 1;
+                continue;
+            }
+            node.keys[i-off] = self.keys[i].clone();
+            node.children[i-off] = self.children[i].clone();
+            // Retain the pages
+            pool.retain(node.children[i-off].page_index);
+            pool.retain(node.keys[i-off].page_index);
+        }
+        Ok(loc)
+    }
+
+    /// Check to see if the node contains the given key
     fn leaf_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
         assert_eq!(MemType::Leaf, self.node_type);
-        index_of(self, key, pool) != NOT_FOUND
+        self.index_of(key, pool) != NOT_FOUND
     }
 
     fn leaf_node_get_iter<'a>(&'a self, pool: &'a Pool) -> KvIter<'a> {
@@ -196,38 +267,7 @@ fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) ->
     i
 }
 
-/// Binary search impl for finding the location of the given key.
-/// Returns NOT_FOUND if the given key does not exist in the node
-fn index_of(n: &NodeHeader, key: &[u8], pool: &Pool) -> usize {
-    if n.num_keys == 0 {
-        return NOT_FOUND
-    }
-    let mut top = n.num_keys;
-    let mut bottom = 0;
-    let mut i = top/2;
-    let mut old_i = i;
-    loop {
-        match key.iter().cmp(get_iter(&n.keys[i], pool)) {
-            cmp::Ordering::Equal => break,
-            cmp::Ordering::Less => top = i,
-            cmp::Ordering::Greater => bottom = i,
-        }
-        if top < bottom {
-            break;
-        }
-        i = bottom + (top + bottom)/2;
-        if i == old_i {
-            break;
-        } else {
-            old_i = i;
-        }
-    }
-    if key.iter().cmp(get_iter(&n.keys[i], pool)) == cmp::Ordering::Equal {
-        i
-    } else {
-        NOT_FOUND
-    }
-}
+
 
 /// Internal nodes have keys in order. The corresponding
 /// child to a key index is the node that contains values
@@ -296,6 +336,47 @@ fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
 pub fn free_space_node_page(_: &Page) -> usize {
     0 // Nodes are designed to fill an entire page
 }
+#[test]
+fn test_leaf_node_remove() {
+    let mut buf = [0u8; 0x7000];
+    let pool = Pool::new(&mut buf);
+    let page_index_1 = pool.alloc().unwrap();
+    let n = EntryLocation {
+        page_index: page_index_1,
+        offset: 0,
+    };
+    let hello: Vec<u8> = "hello".bytes().collect();
+    let world: Vec<u8> = "world".bytes().collect();
+
+    let foo: Vec<u8> = "foo".bytes().collect();
+    let bar: Vec<u8> = "bar".bytes().collect();
+
+    let n = NodeHeader::from_entry(&n, &pool);
+    n.init(0, MemType::Leaf);
+
+    let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+    let n2 = NodeHeader::from_entry(&n2, &pool);
+
+    let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
+    let n3 = NodeHeader::from_entry(&n3, &pool);
+
+    let n4 = n3.leaf_node_remove(3, &foo[..], &pool).unwrap();
+    let n4 = NodeHeader::from_entry(&n4, &pool);
+
+    assert!(n3.leaf_node_contains_key(&foo[..], &pool));
+    assert!(! n4.leaf_node_contains_key(&foo[..], &pool));
+    assert!(n4.leaf_node_contains_key(&hello[..], &pool));
+    assert_eq!(2, n3.num_keys);
+    assert_eq!(2, n3.num_children);
+    assert_eq!(1, n4.num_keys);
+    assert_eq!(1, n4.num_children);
+
+    let n5 = n4.leaf_node_remove(4, &hello, &pool).unwrap();
+    let n5 = NodeHeader::from_entry(&n5, &pool);
+    assert_eq!(0, n5.num_keys);
+    assert_eq!(0, n5.num_children);
+    assert!(!n5.leaf_node_contains_key(&hello[..], &pool));
+}
 
 #[test]
 fn test_release_leaf_node() {
@@ -319,7 +400,7 @@ fn test_release_leaf_node() {
     let page_index_2 = n2.page_index;
     let n2 = NodeHeader::from_entry(&n2, &pool);
 
-    let n3 = n2.leaf_node_insert_non_full(1, &foo[..], &bar[..], &pool).unwrap();
+    let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
     let page_index_3 = n3.page_index;
     let n3 = NodeHeader::from_entry(&n3, &pool);
 
@@ -370,7 +451,7 @@ fn test_insertion_ordering() {
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
     let n2 = NodeHeader::from_entry(&n2, &pool);
 
-    let n3 = n2.leaf_node_insert_non_full(1, &foo[..], &bar[..], &pool).unwrap();
+    let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
     let n3 = NodeHeader::from_entry(&n3, &pool);
 
     assert_eq!(2, n3.num_keys);
@@ -380,8 +461,8 @@ fn test_insertion_ordering() {
     assert!(n3.leaf_node_contains_key(&foo[..], &pool));
 
     // "foo" should sort first before "hello"
-    assert_eq!(0, index_of(n3, &foo[..], &pool));
-    assert_eq!(1, index_of(n3, &hello[..], &pool));
+    assert_eq!(0, n3.index_of(&foo[..], &pool));
+    assert_eq!(1, n3.index_of(&hello[..], &pool));
 
     let result: String = n3.leaf_node_get_iter(&pool)
         .flat_map(|kv_iters| {
