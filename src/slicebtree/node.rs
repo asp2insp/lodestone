@@ -105,6 +105,17 @@ impl NodeHeader {
             NOT_FOUND
         }
     }
+
+    fn get_loc(&self, pool: &Pool) -> EntryLocation {
+        let page_index = unsafe {
+            let self_ptr = self as *const NodeHeader;
+            pool.calc_page_index(mem::transmute(self_ptr))
+        };
+        EntryLocation {
+            page_index: page_index,
+            offset: 0,
+        }
+    }
 }
 
 /// Internal node specific functions
@@ -185,25 +196,6 @@ impl NodeHeader {
             pool: pool,
             index: 0,
         }
-    }
-
-    /// Decrement the ref count for the given node
-    /// Follow keys/children to release all the byte strings
-    fn leaf_node_release(&mut self, pool: &Pool) {
-        // First release the keys and values
-        for el in self.keys.iter() {
-            release_byte_string(el, pool);
-        }
-        for el in self.children.iter() {
-            release_byte_string(el, pool);
-        }
-        // Finally release the node itself
-        // The unsafe call is a performance optimization
-        let page_index = unsafe {
-            let self_ptr = self as *const NodeHeader;
-            pool.calc_page_index(mem::transmute(self_ptr))
-        };
-        pool.release(page_index);
     }
 }
 
@@ -305,18 +297,23 @@ fn insert_into(array: &mut [EntryLocation; B],
     array[index] = loc.clone();
 }
 
+/// Decrement the ref count for the given node
+fn release_node(entry: &EntryLocation, pool: &Pool) {
+    let is_dead = pool.release(entry.page_index);
+    // If this node is now dead, we can recursively
+    // remove its contents
+    if is_dead {
+        release_node_contents(entry, pool);
+    }
+}
+
 /// Release the memory "owned" by the given node
 fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
     let node = NodeHeader::from_entry(entry, pool);
     match node.node_type {
         MemType::Root | MemType::Internal => {
             for e in node.children.iter().take(node.num_children) {
-                let should_recurse = pool.release(e.page_index);
-                // If this node is now dead, we can recursively
-                // remove its contents
-                if should_recurse {
-                    release_node_contents(e, pool);
-                }
+                release_node(e, pool);
             }
         },
         MemType::Leaf => {
@@ -331,10 +328,10 @@ fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
     }
 }
 
-// Treat the given page as a set of nodes, return the remaining
-// free space in the page.
+/// Nodes are designed to fill an entire page
+/// so there's no free space
 pub fn free_space_node_page(_: &Page) -> usize {
-    0 // Nodes are designed to fill an entire page
+    0
 }
 #[test]
 fn test_leaf_node_remove() {
@@ -417,13 +414,13 @@ fn test_release_leaf_node() {
     assert_eq!(3, pool.get_ref_count(children_page));
 
     // Now, we'll free the last node, and watch the ref counts go down
-    n3.leaf_node_release(&pool);
+    release_node(&n3.get_loc(&pool), &pool);
     assert_eq!(1, pool.get_ref_count(keys_page));
     assert_eq!(1, pool.get_ref_count(children_page));
     assert_eq!(0, pool.get_ref_count(page_index_3));
 
     // Then the other node
-    n2.leaf_node_release(&pool);
+    release_node(&n2.get_loc(&pool), &pool);
     assert_eq!(0, pool.get_ref_count(keys_page));
     assert_eq!(0, pool.get_ref_count(children_page));
     assert_eq!(0, pool.get_ref_count(page_index_2));
