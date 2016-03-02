@@ -22,6 +22,7 @@ use super::byte_string::*;
 #[repr(C)]
 pub struct NodeHeader {
     node_type: MemType,
+    page_index: usize,
     tx_id: usize,
     num_keys: usize,
     keys: [EntryLocation; B],
@@ -37,7 +38,8 @@ impl NodeHeader {
 
     /// Perform initial setup, such as fixing the keys/children arrays,
     /// setting the tx_id
-    pub fn init(&mut self, tx: usize, node_type: MemType) {
+    pub fn init(&mut self, page_index: usize, tx: usize, node_type: MemType) {
+        self.page_index = page_index;
         self.num_keys = 0;
         self.num_children = 0;
         self.node_type = node_type;
@@ -55,6 +57,7 @@ impl NodeHeader {
         let node = NodeHeader::from_entry(&loc, pool);
 
         // Copy over values
+        node.page_index = loc.page_index;
         node.node_type = self.node_type.clone();
         node.tx_id = tx_id;
         node.num_keys = self.num_keys;
@@ -106,13 +109,9 @@ impl NodeHeader {
         }
     }
 
-    fn get_loc(&self, pool: &Pool) -> EntryLocation {
-        let page_index = unsafe {
-            let self_ptr = self as *const NodeHeader;
-            pool.calc_page_index(mem::transmute(self_ptr))
-        };
+    fn loc(&self) -> EntryLocation {
         EntryLocation {
-            page_index: page_index,
+            page_index: self.page_index,
             offset: 0,
         }
     }
@@ -349,7 +348,7 @@ fn test_leaf_node_remove() {
     let bar: Vec<u8> = "bar".bytes().collect();
 
     let n = NodeHeader::from_entry(&n, &pool);
-    n.init(0, MemType::Leaf);
+    n.init(page_index_1, 0, MemType::Leaf);
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
     let n2 = NodeHeader::from_entry(&n2, &pool);
@@ -391,7 +390,7 @@ fn test_release_leaf_node() {
     let bar: Vec<u8> = "bar".bytes().collect();
 
     let n = NodeHeader::from_entry(&n, &pool);
-    n.init(0, MemType::Leaf);
+    n.init(page_index_1, 0, MemType::Leaf);
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
     let page_index_2 = n2.page_index;
@@ -414,13 +413,13 @@ fn test_release_leaf_node() {
     assert_eq!(3, pool.get_ref_count(children_page));
 
     // Now, we'll free the last node, and watch the ref counts go down
-    release_node(&n3.get_loc(&pool), &pool);
+    release_node(&n3.loc(), &pool);
     assert_eq!(1, pool.get_ref_count(keys_page));
     assert_eq!(1, pool.get_ref_count(children_page));
     assert_eq!(0, pool.get_ref_count(page_index_3));
 
     // Then the other node
-    release_node(&n2.get_loc(&pool), &pool);
+    release_node(&n2.loc(), &pool);
     assert_eq!(0, pool.get_ref_count(keys_page));
     assert_eq!(0, pool.get_ref_count(children_page));
     assert_eq!(0, pool.get_ref_count(page_index_2));
@@ -431,9 +430,9 @@ fn test_insertion_ordering() {
     use std::iter;
     let mut buf = [0u8; 0x5000];
     let pool = Pool::new(&mut buf);
-    let n = pool.alloc().unwrap();
+    let first_page = pool.alloc().unwrap();
     let n = EntryLocation {
-        page_index: n,
+        page_index: first_page,
         offset: 0,
     };
     let hello: Vec<u8> = "hello".bytes().collect();
@@ -443,7 +442,7 @@ fn test_insertion_ordering() {
     let bar: Vec<u8> = "bar".bytes().collect();
 
     let n = NodeHeader::from_entry(&n, &pool);
-    n.init(0, MemType::Leaf);
+    n.init(first_page, 0, MemType::Leaf);
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
     let n2 = NodeHeader::from_entry(&n2, &pool);
@@ -478,16 +477,16 @@ fn test_insertion_ordering() {
 fn test_insert_internal_non_full() {
     let mut buf = [0u8; 0x4000];
     let pool = Pool::new(&mut buf);
-    let n = pool.alloc().unwrap();
+    let first_page = pool.alloc().unwrap();
     let n = EntryLocation {
-        page_index: n,
+        page_index: first_page,
         offset: 0,
     };
     let key: Vec<u8> = "hello".bytes().collect();
     let value: Vec<u8> = "world".bytes().collect();
 
     let n = NodeHeader::from_entry(&n, &pool);
-    n.init(0, MemType::Leaf);
+    n.init(first_page, 0, MemType::Leaf);
     assert_eq!(0, n.num_keys);
     assert_eq!(0, n.num_children);
 

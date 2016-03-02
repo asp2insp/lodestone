@@ -45,7 +45,8 @@ impl BTree {
         }
 
         for root in &roots {
-            NodeHeader::from_entry(root, &mut page_pool).init(0, MemType::Root);
+            NodeHeader::from_entry(root, &mut page_pool)
+                .init(root.page_index, 0, MemType::Root);
         }
 
         BTree {
