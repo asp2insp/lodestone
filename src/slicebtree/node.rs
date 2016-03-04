@@ -1,4 +1,4 @@
-use std::{cmp,mem};
+use std::cmp;
 use allocator::*;
 
 use super::*;
@@ -49,17 +49,53 @@ impl NodeHeader {
 
 /// Private interface
 impl NodeHeader {
-    fn clone(&self, tx_id: usize, pool: &Pool) -> Result<EntryLocation, &'static str> {
+    fn alloc_node<'a>(node_type: MemType, tx: usize, pool: &'a Pool) -> Result<&'a mut NodeHeader, &'static str> {
         let loc = EntryLocation {
             page_index: try!(pool.alloc()),
             offset: 0,
         };
-        let node = NodeHeader::from_entry(&loc, pool);
+        let mut node = NodeHeader::from_entry(&loc, pool);
+        node.init(loc.page_index, tx, node_type);
+        Ok(node)
+    }
+
+    /// Splits the node in half, immutably, returning a tuple of the
+    /// (
+    ///    new_top_half,
+    ///    new_bottom_half,
+    ///    mid_key,
+    /// )
+    /// For an internal node, they layout is as follows:
+    ///   key1 : key2 : key3 : key4
+    ///   /    |      |      |     \
+    /// c1     c2     c3     c4    c5
+    /// So here, I want to split into
+    /// key1 : key2       key3 : key4
+    ///  /   |            /    |    \
+    /// c1   c2           c3   c4   c5
+    /// So mid_key = 2 = num_keys/2 so we get [0, 1] and [2, 3]
+    /// mid_child = 2 = num_keys/2 so we get [0, 1] and [2, 3, 4]
+    fn split<'a>(&'a self, tx_id: usize, pool: &Pool)
+        -> Result<(&'a NodeHeader, &'a NodeHeader, KvIter<'a>), &'static str> {
+        let new_bottom_half = try!(NodeHeader::alloc_node(self.node_type.clone(), tx_id, pool));
+        let new_top_half = try!(NodeHeader::alloc_node(self.node_type.clone(), tx_id, pool));
+
+        // Find midpoint based on type
+        let midpoint = match self.node_type {
+            MemType::Internal | MemType::Root => 0,
+            MemType::Leaf => self.num_keys / 2,
+            _ => panic!("Split called on non-Node page!"),
+        };
+        // Copy over values
+        // Copy over metadata
+
+        Err("Unimplemented!")
+    }
+
+    fn clone(&self, tx_id: usize, pool: &Pool) -> Result<EntryLocation, &'static str> {
+        let node = try!(NodeHeader::alloc_node(self.node_type.clone(), tx_id, pool));
 
         // Copy over values
-        node.page_index = loc.page_index;
-        node.node_type = self.node_type.clone();
-        node.tx_id = tx_id;
         node.num_keys = self.num_keys;
         node.num_children = self.num_children;
 
@@ -73,7 +109,7 @@ impl NodeHeader {
             // Retain the page
             pool.retain(node.children[i].page_index);
         }
-        Ok(loc)
+        Ok(node.loc())
     }
 
     /// Binary search impl for finding the location of the given key.
@@ -332,6 +368,7 @@ fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
 pub fn free_space_node_page(_: &Page) -> usize {
     0
 }
+
 #[test]
 fn test_leaf_node_remove() {
     let mut buf = [0u8; 0x7000];
