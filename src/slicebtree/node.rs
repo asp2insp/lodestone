@@ -1,4 +1,4 @@
-use std::cmp;
+use std::{cmp,iter};
 use allocator::*;
 
 use super::*;
@@ -175,6 +175,20 @@ impl NodeHeader {
             offset: 0,
         }
     }
+
+    fn to_string(&self, pool: &Pool) -> String {
+        let result: String = self.leaf_node_get_iter(pool)
+            .flat_map(|kv_iters| {
+                kv_iters.0.cloned()
+                    .chain(iter::once(b':'))
+                    .chain(kv_iters.1.cloned())
+                    .chain(iter::once(b','))
+                    .chain(iter::once(b' '))
+            })
+            .map(|b| b as char)
+            .collect();
+        result
+    }
 }
 
 /// Internal node specific functions
@@ -315,6 +329,7 @@ fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) ->
             old_i = i;
         }
     }
+    println!("I: {}", i);
     i
 }
 
@@ -349,7 +364,7 @@ fn insert_into(array: &mut [EntryLocation; B],
           array_size: usize,
                  loc: &EntryLocation,
                index: usize) {
-    // First find the index where we want to insert
+    // Shift everything after the index where we're inserting down
     for i in (index+1..array_size).rev() {
         array[i] = array[i-1].clone();
     }
@@ -395,26 +410,31 @@ pub fn free_space_node_page(_: &Page) -> usize {
 
 #[test]
 fn test_leaf_node_split() {
-    let mut buf = [0u8; 0x7000];
+    let mut buf = [0u8; 0x8000];
     let pool = Pool::new(&mut buf);
     let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
     let hello: Vec<u8> = "hello".bytes().collect();
     let world: Vec<u8> = "world".bytes().collect();
     let foo: Vec<u8> = "foo".bytes().collect();
     let bar: Vec<u8> = "bar".bytes().collect();
+    let rust: Vec<u8> = "rust".bytes().collect();
+    let iscool: Vec<u8> = "is cool".bytes().collect();
 
-    let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-    let n2 = NodeHeader::from_entry(&n2, &pool);
+    let n = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+    let n = NodeHeader::from_entry(&n, &pool);
+    let n = n.leaf_node_insert_non_full(2, &rust[..], &iscool[..], &pool).unwrap();
+    let n = NodeHeader::from_entry(&n, &pool);
+    let n = n.leaf_node_insert_non_full(3, &foo[..], &bar[..], &pool).unwrap();
+    let n = NodeHeader::from_entry(&n, &pool);
 
-    let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
-    let n3 = NodeHeader::from_entry(&n3, &pool);
+    println!("CURRENT CONTENTS: {}", n.to_string(&pool));
 
-    let (nb, nt, mid) = n3.split(3, &pool).unwrap();
+    let (nb, nt, mid) = n.split(4, &pool).unwrap();
     // Each half should have 1 key and 1 child
     assert_eq!(1, nb.num_keys);
     assert_eq!(1, nb.num_children);
-    assert_eq!(1, nt.num_keys);
-    assert_eq!(1, nt.num_children);
+    assert_eq!(2, nt.num_keys);
+    assert_eq!(2, nt.num_children);
     assert_eq!("hello", mid.cloned().map(|c| c as char).collect::<String>());
 
     assert!(nt.leaf_node_contains_key(&hello[..], &pool));
@@ -422,6 +442,8 @@ fn test_leaf_node_split() {
 
     assert!(!nb.leaf_node_contains_key(&hello[..], &pool));
     assert!(!nt.leaf_node_contains_key(&foo[..], &pool));
+
+    assert!(nt.leaf_node_contains_key(&rust[..], &pool));
 }
 
 #[test]
@@ -535,16 +557,7 @@ fn test_insertion_ordering() {
     assert_eq!(0, n3.index_of(&foo[..], &pool));
     assert_eq!(1, n3.index_of(&hello[..], &pool));
 
-    let result: String = n3.leaf_node_get_iter(&pool)
-        .flat_map(|kv_iters| {
-            kv_iters.0.cloned()
-                .chain(iter::once(b':'))
-                .chain(kv_iters.1.cloned())
-                .chain(iter::once(b','))
-                .chain(iter::once(b' '))
-        })
-        .map(|b| b as char)
-        .collect();
+    let result = n3.to_string(&pool);
     assert_eq!("foo:bar, hello:world, ", result);
 }
 
