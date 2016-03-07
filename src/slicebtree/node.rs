@@ -75,21 +75,45 @@ impl NodeHeader {
     /// c1   c2           c3   c4   c5
     /// So mid_key = 2 = num_keys/2 so we get [0, 1] and [2, 3]
     /// mid_child = 2 = num_keys/2 so we get [0, 1] and [2, 3, 4]
-    fn split<'a>(&'a self, tx_id: usize, pool: &Pool)
-        -> Result<(&'a NodeHeader, &'a NodeHeader, KvIter<'a>), &'static str> {
+    fn split<'a>(&'a self, tx_id: usize, pool: &'a Pool)
+        -> Result<(&'a NodeHeader, &'a NodeHeader, ByteStringIter<'a>), &'static str> {
         let new_bottom_half = try!(NodeHeader::alloc_node(self.node_type.clone(), tx_id, pool));
         let new_top_half = try!(NodeHeader::alloc_node(self.node_type.clone(), tx_id, pool));
 
         // Find midpoint based on type
-        let midpoint = match self.node_type {
-            MemType::Internal | MemType::Root => 0,
-            MemType::Leaf => self.num_keys / 2,
-            _ => panic!("Split called on non-Node page!"),
-        };
+        let midpoint = self.num_keys/2;
         // Copy over values
+        for i in 0..midpoint {
+            new_bottom_half.keys[i] = self.keys[i].clone();
+            // Retain the page
+            pool.retain(new_bottom_half.keys[i].page_index);
+        }
+        for i in 0..midpoint {
+            new_bottom_half.children[i] = self.children[i].clone();
+            // Retain the page
+            pool.retain(new_bottom_half.children[i].page_index);
+        }
+        for i in midpoint..self.num_keys {
+            new_top_half.keys[i-midpoint] = self.keys[i].clone();
+            // Retain the page
+            pool.retain(new_top_half.keys[i-midpoint].page_index);
+        }
+        for i in midpoint..self.num_children {
+            new_top_half.children[i-midpoint] = self.children[i].clone();
+            // Retain the page
+            pool.retain(new_top_half.children[i-midpoint].page_index);
+        }
         // Copy over metadata
+        new_bottom_half.num_keys = midpoint;
+        new_bottom_half.num_children = midpoint;
+        new_top_half.num_keys = self.num_keys - midpoint;
+        new_top_half.num_children = self.num_children - midpoint;
 
-        Err("Unimplemented!")
+        Ok((
+            new_bottom_half,
+            new_top_half,
+            get_iter(&self.keys[midpoint], pool),
+        ))
     }
 
     fn clone(&self, tx_id: usize, pool: &Pool) -> Result<EntryLocation, &'static str> {
@@ -370,22 +394,48 @@ pub fn free_space_node_page(_: &Page) -> usize {
 }
 
 #[test]
+fn test_leaf_node_split() {
+    let mut buf = [0u8; 0x7000];
+    let pool = Pool::new(&mut buf);
+    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let hello: Vec<u8> = "hello".bytes().collect();
+    let world: Vec<u8> = "world".bytes().collect();
+    let foo: Vec<u8> = "foo".bytes().collect();
+    let bar: Vec<u8> = "bar".bytes().collect();
+
+    let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+    let n2 = NodeHeader::from_entry(&n2, &pool);
+
+    let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
+    let n3 = NodeHeader::from_entry(&n3, &pool);
+
+    let (nb, nt, mid) = n3.split(3, &pool).unwrap();
+    // Each half should have 1 key and 1 child
+    assert_eq!(1, nb.num_keys);
+    assert_eq!(1, nb.num_children);
+    assert_eq!(1, nt.num_keys);
+    assert_eq!(1, nt.num_children);
+    assert_eq!("hello", mid.cloned().map(|c| c as char).collect::<String>());
+
+    assert!(nt.leaf_node_contains_key(&hello[..], &pool));
+    assert!(nb.leaf_node_contains_key(&foo[..], &pool));
+
+    assert!(!nb.leaf_node_contains_key(&hello[..], &pool));
+    assert!(!nt.leaf_node_contains_key(&foo[..], &pool));
+}
+
+#[test]
 fn test_leaf_node_remove() {
     let mut buf = [0u8; 0x7000];
     let pool = Pool::new(&mut buf);
-    let page_index_1 = pool.alloc().unwrap();
-    let n = EntryLocation {
-        page_index: page_index_1,
-        offset: 0,
-    };
+    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let page_index_1 = n.loc().page_index;
+
     let hello: Vec<u8> = "hello".bytes().collect();
     let world: Vec<u8> = "world".bytes().collect();
 
     let foo: Vec<u8> = "foo".bytes().collect();
     let bar: Vec<u8> = "bar".bytes().collect();
-
-    let n = NodeHeader::from_entry(&n, &pool);
-    n.init(page_index_1, 0, MemType::Leaf);
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
     let n2 = NodeHeader::from_entry(&n2, &pool);
@@ -415,19 +465,14 @@ fn test_leaf_node_remove() {
 fn test_release_leaf_node() {
     let mut buf = [0u8; 0x5000];
     let pool = Pool::new(&mut buf);
-    let page_index_1 = pool.alloc().unwrap();
-    let n = EntryLocation {
-        page_index: page_index_1,
-        offset: 0,
-    };
+    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let page_index_1 = n.loc().page_index;
+
     let hello: Vec<u8> = "hello".bytes().collect();
     let world: Vec<u8> = "world".bytes().collect();
 
     let foo: Vec<u8> = "foo".bytes().collect();
     let bar: Vec<u8> = "bar".bytes().collect();
-
-    let n = NodeHeader::from_entry(&n, &pool);
-    n.init(page_index_1, 0, MemType::Leaf);
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
     let page_index_2 = n2.page_index;
@@ -467,19 +512,12 @@ fn test_insertion_ordering() {
     use std::iter;
     let mut buf = [0u8; 0x5000];
     let pool = Pool::new(&mut buf);
-    let first_page = pool.alloc().unwrap();
-    let n = EntryLocation {
-        page_index: first_page,
-        offset: 0,
-    };
+    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
     let hello: Vec<u8> = "hello".bytes().collect();
     let world: Vec<u8> = "world".bytes().collect();
 
     let foo: Vec<u8> = "foo".bytes().collect();
     let bar: Vec<u8> = "bar".bytes().collect();
-
-    let n = NodeHeader::from_entry(&n, &pool);
-    n.init(first_page, 0, MemType::Leaf);
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
     let n2 = NodeHeader::from_entry(&n2, &pool);
@@ -514,16 +552,11 @@ fn test_insertion_ordering() {
 fn test_insert_internal_non_full() {
     let mut buf = [0u8; 0x4000];
     let pool = Pool::new(&mut buf);
-    let first_page = pool.alloc().unwrap();
-    let n = EntryLocation {
-        page_index: first_page,
-        offset: 0,
-    };
+    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+
     let key: Vec<u8> = "hello".bytes().collect();
     let value: Vec<u8> = "world".bytes().collect();
 
-    let n = NodeHeader::from_entry(&n, &pool);
-    n.init(first_page, 0, MemType::Leaf);
     assert_eq!(0, n.num_keys);
     assert_eq!(0, n.num_children);
 
@@ -544,6 +577,7 @@ fn test_insert_internal_non_full() {
 
 #[test]
 fn test_invariants() {
+    use std::mem;
     println!("CHECK {:?} < {:?}?", mem::size_of::<NodeHeader>(), PAGE_SIZE);
     assert!(mem::size_of::<NodeHeader>() < PAGE_SIZE);
 }
