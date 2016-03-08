@@ -251,7 +251,7 @@ pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<
             panic!("get_iter called on a deleted entry");
         },
         _ => {
-            panic!("get_iter called on a Node instead of an entry: {:?}", entry);
+            panic!("get_iter called on a {:?} instead of an entry: {:?}", header.entry_type, entry);
         },
     }
 }

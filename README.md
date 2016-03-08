@@ -12,3 +12,7 @@
 ## Clean Up
  * Move all node_functions that currently take an entry_loc to be object-oriented instead
  * Replace unsafe ptr copy with slice_clone_from_slice()
+ * Replace aliasing with contiguous allocation
+    * Will save overhead
+    * Will simplify code
+    * Allows interop with zero etc

@@ -139,23 +139,38 @@ impl NodeHeader {
     /// Binary search impl for finding the location of the given key.
     /// Returns NOT_FOUND if the given key does not exist in the node
     fn index_of(&self, key: &[u8], pool: &Pool) -> usize {
-        if self.num_keys == 0 {
-            return NOT_FOUND
+        let (found, index) = self.index_or_insertion_of(key, pool);
+        if found {
+            index
+        } else {
+            NOT_FOUND
         }
-        let mut top = self.num_keys;
+    }
+
+    /// The first return value is true if the given key exists in the node.
+    /// The second parameter is the location of the key if it exists, or the
+    /// point where the key should be inserted if it does not already exist.
+    fn index_or_insertion_of(&self, key: &[u8], pool: &Pool) -> (bool, usize) {
+        if self.num_keys == 0 {
+            return (false, 0)
+        } else if key.iter()
+            .cmp(get_iter(&self.keys[self.num_keys-1], pool)) == cmp::Ordering::Greater {
+            return (false, self.num_keys)
+        }
+        let mut top = self.num_keys-1;
         let mut bottom = 0;
         let mut i = top/2;
         let mut old_i = i;
         loop {
             match key.iter().cmp(get_iter(&self.keys[i], pool)) {
                 cmp::Ordering::Equal => break,
-                cmp::Ordering::Less => top = i,
-                cmp::Ordering::Greater => bottom = i,
+                cmp::Ordering::Less => top = if i > 1 {i-1} else {0},
+                cmp::Ordering::Greater => bottom = i+1,
             }
             if top < bottom {
                 break;
             }
-            i = bottom + (top + bottom)/2;
+            i = bottom + (top - bottom)/2;
             if i == old_i {
                 break;
             } else {
@@ -163,9 +178,9 @@ impl NodeHeader {
             }
         }
         if key.iter().cmp(get_iter(&self.keys[i], pool)) == cmp::Ordering::Equal {
-            i
+            (true, i)
         } else {
-            NOT_FOUND
+            (false, i)
         }
     }
 
@@ -199,7 +214,7 @@ impl NodeHeader {
 /// Leaf node specific functions
 impl NodeHeader {
     /// Insert in an append only/immutable fashion
-    fn leaf_node_insert_non_full(&mut self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
+    fn leaf_node_insert_non_full<'a>(&'a self, tx_id: usize, key: &[u8], value: &[u8], pool: &'a Pool) -> Result<&'a NodeHeader, &'static str> {
         assert_eq!(MemType::Leaf, self.node_type);
         let page_hint = if self.num_keys > 0 {
             get_page_hint(&self.keys, self.num_keys-1)
@@ -218,12 +233,12 @@ impl NodeHeader {
         let loc = try!(self.clone(tx_id, pool));
         let node = NodeHeader::from_entry(&loc, pool);
         insert_child_non_full(node, &key_loc, &val_loc, pool);
-        Ok(loc)
+        Ok(node)
     }
 
     /// Remove in an append-only/immutable fashion.
     /// Precondition: key must exist. Panics if key does not exist
-    fn leaf_node_remove(&mut self, tx_id: usize, key: &[u8], pool:&Pool) -> Result<EntryLocation, &'static str> {
+    fn leaf_node_remove<'a>(&'a self, tx_id: usize, key: &[u8], pool:&'a Pool) -> Result<&'a NodeHeader, &'static str> {
         assert_eq!(MemType::Leaf, self.node_type);
         let index = self.index_of(key, pool);
         if index == NOT_FOUND {
@@ -254,7 +269,7 @@ impl NodeHeader {
             pool.retain(node.children[i-off].page_index);
             pool.retain(node.keys[i-off].page_index);
         }
-        Ok(loc)
+        Ok(node)
     }
 
     /// Check to see if the node contains the given key
@@ -302,39 +317,6 @@ fn get_page_hint(array: &[EntryLocation; B], last_index: usize) -> usize {
     array[last_index].page_index
 }
 
-/// Binary search impl for finding the location at which the given
-/// key should be inserted
-fn find_insertion_index(n: &NodeHeader, key_loc: &EntryLocation, pool: &Pool) -> usize {
-    if n.num_keys == 0 {
-        return 0
-    }
-    let mut top = n.num_keys;
-    let mut bottom = 0;
-    let mut i = top/2;
-    let mut old_i = i;
-
-    loop {
-        match cmp(key_loc, &n.keys[i], pool) {
-            cmp::Ordering::Equal => break,
-            cmp::Ordering::Less => top = i,
-            cmp::Ordering::Greater => bottom = i,
-        }
-        if top < bottom {
-            break;
-        }
-        i = bottom + (top + bottom)/2;
-        if i == old_i {
-            break;
-        } else {
-            old_i = i;
-        }
-    }
-    println!("I: {}", i);
-    i
-}
-
-
-
 /// Internal nodes have keys in order. The corresponding
 /// child to a key index is the node that contains values
 /// less than or equal to the key.
@@ -350,7 +332,7 @@ fn insert_child_non_full(n: &mut NodeHeader,
       child_loc: &EntryLocation,
            pool: &Pool) {
     // First find the index where we want to insert
-    let index = find_insertion_index(n, key_loc, pool);
+    let (_, index) = n.index_or_insertion_of(get_slice(key_loc, pool), pool);
     n.num_children += 1;
     insert_into(&mut n.children, n.num_children, child_loc, index);
     n.num_keys += 1;
@@ -413,19 +395,16 @@ fn test_leaf_node_split() {
     let mut buf = [0u8; 0x8000];
     let pool = Pool::new(&mut buf);
     let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
-    let hello: Vec<u8> = "hello".bytes().collect();
-    let world: Vec<u8> = "world".bytes().collect();
-    let foo: Vec<u8> = "foo".bytes().collect();
-    let bar: Vec<u8> = "bar".bytes().collect();
-    let rust: Vec<u8> = "rust".bytes().collect();
-    let iscool: Vec<u8> = "is cool".bytes().collect();
+    let hello = String::from("hello").into_bytes();
+    let world = String::from("world").into_bytes();
+    let foo = String::from("foo").into_bytes();
+    let bar = String::from("bar").into_bytes();
+    let rust = String::from("rust").into_bytes();
+    let iscool = String::from("is cool").into_bytes();
 
     let n = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-    let n = NodeHeader::from_entry(&n, &pool);
     let n = n.leaf_node_insert_non_full(2, &rust[..], &iscool[..], &pool).unwrap();
-    let n = NodeHeader::from_entry(&n, &pool);
     let n = n.leaf_node_insert_non_full(3, &foo[..], &bar[..], &pool).unwrap();
-    let n = NodeHeader::from_entry(&n, &pool);
 
     println!("CURRENT CONTENTS: {}", n.to_string(&pool));
 
@@ -453,20 +432,15 @@ fn test_leaf_node_remove() {
     let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
     let page_index_1 = n.loc().page_index;
 
-    let hello: Vec<u8> = "hello".bytes().collect();
-    let world: Vec<u8> = "world".bytes().collect();
+    let hello = String::from("hello").into_bytes();
+    let world = String::from("world").into_bytes();
 
-    let foo: Vec<u8> = "foo".bytes().collect();
-    let bar: Vec<u8> = "bar".bytes().collect();
+    let foo = String::from("foo").into_bytes();
+    let bar = String::from("bar").into_bytes();
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-    let n2 = NodeHeader::from_entry(&n2, &pool);
-
     let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
-    let n3 = NodeHeader::from_entry(&n3, &pool);
-
     let n4 = n3.leaf_node_remove(3, &foo[..], &pool).unwrap();
-    let n4 = NodeHeader::from_entry(&n4, &pool);
 
     assert!(n3.leaf_node_contains_key(&foo[..], &pool));
     assert!(! n4.leaf_node_contains_key(&foo[..], &pool));
@@ -477,7 +451,6 @@ fn test_leaf_node_remove() {
     assert_eq!(1, n4.num_children);
 
     let n5 = n4.leaf_node_remove(4, &hello, &pool).unwrap();
-    let n5 = NodeHeader::from_entry(&n5, &pool);
     assert_eq!(0, n5.num_keys);
     assert_eq!(0, n5.num_children);
     assert!(!n5.leaf_node_contains_key(&hello[..], &pool));
@@ -490,19 +463,16 @@ fn test_release_leaf_node() {
     let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
     let page_index_1 = n.loc().page_index;
 
-    let hello: Vec<u8> = "hello".bytes().collect();
-    let world: Vec<u8> = "world".bytes().collect();
-
-    let foo: Vec<u8> = "foo".bytes().collect();
-    let bar: Vec<u8> = "bar".bytes().collect();
+    let hello = String::from("hello").into_bytes();
+    let world = String::from("world").into_bytes();
+    let foo = String::from("foo").into_bytes();
+    let bar = String::from("bar").into_bytes();
 
     let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-    let page_index_2 = n2.page_index;
-    let n2 = NodeHeader::from_entry(&n2, &pool);
+    let page_index_2 = n2.loc().page_index;
 
     let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
-    let page_index_3 = n3.page_index;
-    let n3 = NodeHeader::from_entry(&n3, &pool);
+    let page_index_3 = n3.loc().page_index;
 
     let keys_page = n3.keys[0].page_index;
     let children_page = n3.children[0].page_index;
@@ -530,52 +500,18 @@ fn test_release_leaf_node() {
 }
 
 #[test]
-fn test_insertion_ordering() {
-    use std::iter;
-    let mut buf = [0u8; 0x5000];
-    let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
-    let hello: Vec<u8> = "hello".bytes().collect();
-    let world: Vec<u8> = "world".bytes().collect();
-
-    let foo: Vec<u8> = "foo".bytes().collect();
-    let bar: Vec<u8> = "bar".bytes().collect();
-
-    let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-    let n2 = NodeHeader::from_entry(&n2, &pool);
-
-    let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
-    let n3 = NodeHeader::from_entry(&n3, &pool);
-
-    assert_eq!(2, n3.num_keys);
-    assert_eq!(2, n3.num_children);
-
-    assert!(n3.leaf_node_contains_key(&hello[..], &pool));
-    assert!(n3.leaf_node_contains_key(&foo[..], &pool));
-
-    // "foo" should sort first before "hello"
-    assert_eq!(0, n3.index_of(&foo[..], &pool));
-    assert_eq!(1, n3.index_of(&hello[..], &pool));
-
-    let result = n3.to_string(&pool);
-    assert_eq!("foo:bar, hello:world, ", result);
-}
-
-#[test]
 fn test_insert_internal_non_full() {
     let mut buf = [0u8; 0x4000];
     let pool = Pool::new(&mut buf);
     let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
 
-    let key: Vec<u8> = "hello".bytes().collect();
-    let value: Vec<u8> = "world".bytes().collect();
+    let key = String::from("hello").into_bytes();
+    let value = String::from("world").into_bytes();
 
     assert_eq!(0, n.num_keys);
     assert_eq!(0, n.num_children);
 
     let n2 = n.leaf_node_insert_non_full(1, &key[..], &value[..], &pool).unwrap();
-    let n2 = NodeHeader::from_entry(&n2, &pool);
-
     assert_eq!(0, n.num_keys);
     assert_eq!(0, n.num_children);
     assert_eq!(1, n2.num_keys);
@@ -586,6 +522,37 @@ fn test_insert_internal_non_full() {
 
     assert!(n2.leaf_node_contains_key(&key[..], &pool));
     assert!(!n.leaf_node_contains_key(&key[..], &pool));
+}
+
+#[test]
+fn test_insertion_ordering() {
+    let mut buf = [0u8; 0x7000];
+    let pool = Pool::new(&mut buf);
+    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+
+    let apple = String::from("apple").into_bytes();
+    let banana = String::from("banana").into_bytes();
+    let cherry = String::from("cherry").into_bytes();
+    let blueberry = String::from("blueberry").into_bytes();
+
+    let n = n.leaf_node_insert_non_full(1, &banana[..], &banana[..], &pool).unwrap();
+    let n = n.leaf_node_insert_non_full(1, &apple[..], &apple[..], &pool).unwrap();
+    assert_eq!(1, n.index_of(&banana[..], &pool));
+    assert_eq!(0, n.index_of(&apple[..], &pool));
+
+    let n = n.leaf_node_insert_non_full(1, &cherry[..], &cherry[..], &pool).unwrap();
+    assert_eq!(1, n.index_of(&banana[..], &pool));
+    assert_eq!(0, n.index_of(&apple[..], &pool));
+    assert_eq!(2, n.index_of(&cherry[..], &pool));
+
+    let n = n.leaf_node_insert_non_full(1, &blueberry[..], &blueberry[..], &pool).unwrap();
+    assert_eq!(1, n.index_of(&banana[..], &pool));
+    assert_eq!(0, n.index_of(&apple[..], &pool));
+    assert_eq!(3, n.index_of(&cherry[..], &pool));
+    assert_eq!(2, n.index_of(&blueberry[..], &pool));
+
+    assert_eq!("apple:apple, banana:banana, blueberry:blueberry, cherry:cherry, ",
+        n.to_string(&pool));
 }
 
 #[test]
