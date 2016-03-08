@@ -232,7 +232,12 @@ impl NodeHeader {
 
         let loc = try!(self.clone(tx_id, pool));
         let node = NodeHeader::from_entry(&loc, pool);
-        insert_child_non_full(node, &key_loc, &val_loc, pool);
+
+        let (_, index) = node.index_or_insertion_of(key, pool);
+        node.num_children += 1;
+        insert_into(&mut node.children, node.num_children, &val_loc, index);
+        node.num_keys += 1;
+        insert_into(&mut node.keys, node.num_keys, &key_loc, index);
         Ok(node)
     }
 
@@ -324,20 +329,7 @@ fn get_page_hint(array: &[EntryLocation; B], last_index: usize) -> usize {
 /// Thus, internal nodes can hold up to B-1 keys and B children.
 /// Leaf nodes have a 1-1 correspndence of key to value, holding
 /// up to B keys and B children.
-/// Precondition: The node must have enough space
-/// The memory should already be allocated, this
-/// just inserts the reference in the correct location.
-fn insert_child_non_full(n: &mut NodeHeader,
-        key_loc: &EntryLocation,
-      child_loc: &EntryLocation,
-           pool: &Pool) {
-    // First find the index where we want to insert
-    let (_, index) = n.index_or_insertion_of(get_slice(key_loc, pool), pool);
-    n.num_children += 1;
-    insert_into(&mut n.children, n.num_children, child_loc, index);
-    n.num_keys += 1;
-    insert_into(&mut n.keys, n.num_keys, key_loc, index);
-}
+
 
 /// Precondition: The node must have enough space
 /// The memory should already be allocated, this
