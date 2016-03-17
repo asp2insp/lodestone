@@ -25,7 +25,7 @@ pub struct Pool {
     slot_size: usize,
     header_size: usize,
 
-    free_list: RefCell<LinkedList<PageIndex>>,
+    free_list: RefCell<Vec<PageIndex>>,
 }
 
 struct SlotHeader {
@@ -45,7 +45,7 @@ impl Pool {
             slot_size: slot_size,
             capacity: buf.len() / slot_size,
             header_size: header_size,
-            free_list: RefCell::new(LinkedList::new()),
+            free_list: RefCell::new(Vec::new()),
         }
     }
 
@@ -87,6 +87,16 @@ impl Pool {
         Ok(index)
     }
 
+    /// Try to allocate multiple contiguous pages in a contiguous chunk
+    pub fn alloc_contiguous(&self, num_pages: usize) -> Result<Vec<PageIndex>, &'static str> {
+        let mut res: Vec<PageIndex> = Vec::with_capacity(num_pages);
+        for i in 0..num_pages {
+            res.push(try!(self.push_back_alloc()));
+        }
+        // self.zero_page(res[i]);
+        Ok(res)
+    }
+
     // Increase the ref count for the cell at the given index
     pub fn retain(&self, index: PageIndex) {
         let h = self.header_for(index);
@@ -106,7 +116,7 @@ impl Pool {
             }
         }
         if is_free {
-            self.free_list.borrow_mut().push_back(index);
+            insert_sorted(&mut *self.free_list.borrow_mut(), index);
         }
         is_free
     }
@@ -123,7 +133,7 @@ impl Pool {
     // Returns an item from the free list, or
     // tries to allocate a new one from the buffer
     fn claim_free_index(&self) -> Result<PageIndex, &'static str> {
-        let index = match self.free_list.borrow_mut().pop_front() {
+        let index = match self.free_list.borrow_mut().pop() {
             Some(i) => i,
             None => try!(self.push_back_alloc()),
         };
@@ -208,6 +218,16 @@ impl IndexMut<PageIndex> for Pool {
             mem::transmute(ptr)
         }
     }
+}
+
+fn insert_sorted(vec: &mut Vec<PageIndex>, index: PageIndex) {
+    let mut i = vec.len()-1;
+    // Reverse sort the free list
+    // So that lowest pages are nearest the end
+    while i >= 0 && vec[i] >= index {
+        i -= 1;
+    }
+    vec.insert(i, index);
 }
 
 /// Tests

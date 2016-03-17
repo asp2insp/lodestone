@@ -1,3 +1,9 @@
+## Branch byte_pool
+ * Rewrite pool to be a traditional malloc/free impl over a non-segmented set of bytes. Smallest allowed chunk is a PAGE_SIZE.
+ * Use Arc semantics to alloc/free memory. Arcs are backed by an entry in the refs_page, so that they're persistent.
+ * This lets us switch to a slice-based or pointer-based API.
+ 
+
 ## Limitations
  * Max number of concurrent transactions: `usize::max_value()`
  * Only 1 write transaction at a time
@@ -12,7 +18,7 @@
 ## Clean Up
  * Move all node_functions that currently take an entry_loc to be object-oriented instead
  * Replace unsafe ptr copy with slice_clone_from_slice()
- * Replace aliasing with contiguous allocation
-    * Will save overhead
-    * Will simplify code
-    * Allows interop with zero etc
+ * Add ARC semantics to EntryLocation
+ * Clean up special casing for get_iter
+ * Change constructor for Pool to consume a vec
+ * FIX PAGE DEFINITIONS FOR 32 BIT SYSTEMS

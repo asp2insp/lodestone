@@ -1,4 +1,4 @@
-use std::{mem, slice, cmp, ptr};
+use std::{mem, slice, cmp, ptr, iter};
 use allocator::*;
 
 use super::*;
@@ -59,12 +59,12 @@ pub fn release_byte_string(entry: &EntryLocation, pool: &Pool) {
 }
 
 /// Get the header for the entry pointed to by the given location
-fn get_entry_header<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut ByteStringEntry {
+fn get_entry_header<'a, 'b: 'a>(entry: &'a EntryLocation, pool: &'b Pool) -> &'a mut ByteStringEntry {
     pool[entry.page_index].transmute_segment_mut::<ByteStringEntry>(entry.offset)
 }
 
 /// Returns a slice of the entries which are aliased by the given entry
-pub fn get_aliased_entries<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[EntryLocation] {
+pub fn get_aliased_entries<'a, 'b: 'a>(entry: &'a EntryLocation, pool: &'b Pool) -> &'a[EntryLocation] {
     let header = get_entry_header(entry, pool);
     assert_eq!(MemType::Alias, header.entry_type);
 
@@ -101,20 +101,31 @@ pub fn alloc_with_contents(page_hint: usize, contents: &[u8], pool: &Pool) -> Re
         }
     }
     // go for a new page
-    if contents.len() > *BSE_CHUNK_SIZE {
-        alias_alloc_with_contents(contents, pool)
-    } else {
+    let len = contents.len();
+    if len <= *BSE_CHUNK_SIZE {
         let index = try!(pool.alloc());
         append_to_with_contents(index, contents, pool)
+    } else if len <= *ALIASED_BSE_MAX_SIZE {
+        // This will fit in 1 level of aliasing
+        let num_chunks = calc_num_chunks(contents.len());
+        alias_alloc_with_contents(contents, num_chunks, *BSE_CHUNK_SIZE, pool)
+    } else {
+        // This needs multiple levels of aliasing. So, we're going to divide
+        // up the string into equal parts, and then let recursion handle the rest.
+        let num_chunks = if len % *MAX_ALIASES_PER_CHUNK == 0 {
+            *MAX_ALIASES_PER_CHUNK
+        } else {
+            *MAX_ALIASES_PER_CHUNK + 1
+        };
+        let step_size = len / num_chunks;
+        alias_alloc_with_contents(contents, num_chunks, step_size, pool)
     }
 }
 
 /// Allocate a new byte string that requires aliasing and populate it with the
 /// given contents. Returns Ok if the operation succeeded and Err if the
 /// allocation failed
-pub fn alias_alloc_with_contents(contents: &[u8], pool: &Pool) -> Result<EntryLocation, &'static str> {
-    let num_chunks = calc_num_chunks(contents.len());
-
+pub fn alias_alloc_with_contents(contents: &[u8], num_chunks: usize, step_size: usize, pool: &Pool) -> Result<EntryLocation, &'static str> {
     let page_index = try!(pool.alloc());
     let page = &pool[page_index];
     let mut alias_header = page.transmute_page_mut::<ByteStringEntry>();
@@ -124,21 +135,21 @@ pub fn alias_alloc_with_contents(contents: &[u8], pool: &Pool) -> Result<EntryLo
     let mut offset = *BSE_HEADER_SIZE;
     let mut contents_offset = 0;
     for _ in 0..num_chunks {
-        let index = try!(pool.alloc());
-        let mut next = contents_offset + *BSE_CHUNK_SIZE;
+        let mut next = contents_offset + step_size;
         if next > contents.len() {
             next = contents.len();
         }
-        let loc = try!(append_to_with_contents(index,
+        // Now, recursively call alloc_with_contents which can do the right
+        // thing for this chunk of bytes, and store result in this block
+        let mut el_ptr = page.transmute_segment_mut::<EntryLocation>(offset);
+        *el_ptr = try!(alloc_with_contents(NO_HINT,
             &contents[contents_offset..next],
             pool));
-        let mut el_ptr = page.transmute_segment_mut::<EntryLocation>(offset);
-        el_ptr.page_index = loc.page_index;
-        el_ptr.offset = loc.offset;
 
         contents_offset = next;
         offset += *EL_PTR_SIZE;
     }
+    assert_eq!(contents.len(), contents_offset);
     Ok(EntryLocation {
         page_index: page_index,
         offset: 0,
@@ -195,7 +206,7 @@ pub fn next_free_offset(page: &Page) -> usize {
 
 /// Treates the entry location as a ByteStringEntry
 /// Panics if not given the correct entry
-pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
+pub fn get_slice<'a, 'b: 'a>(entry: &'a EntryLocation, pool: &'b Pool) -> &'a[u8] {
     let header = get_entry_header(entry, pool);
     assert_eq!(MemType::Entry, header.entry_type);
 
@@ -205,7 +216,7 @@ pub fn get_slice<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a[u8] {
 
 /// Treates the entry location as a ByteStringEntry
 /// Panics if not given the correct entry
-pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] {
+pub fn get_slice_mut<'a, 'b: 'a>(entry: &'a EntryLocation, pool: &'b Pool) -> &'a mut [u8] {
     let header = get_entry_header(entry, pool);
     assert_eq!(MemType::Entry, header.entry_type);
 
@@ -215,88 +226,140 @@ pub fn get_slice_mut<'a>(entry: &EntryLocation, pool: &'a Pool) -> &'a mut [u8] 
     &mut page[start..start+header.contents_size]
 }
 
-/// Get the iter over the memory represented by the bytestring
-pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<'a> {
-    let page = &pool[entry.page_index];
-    let header = get_entry_header(entry, pool);
-    match header.entry_type {
-        MemType::Entry => {
-            ByteStringIter {
-                entry: entry,
-                pool: pool,
-
-                is_aliased: false,
-                current_page: page,
-                current_entry: entry,
-                current_string: header,
-                alias_index: 0,
-                byte_index: 0,
+pub fn get_iter<'a, 'b: 'a>(entry: &'a EntryLocation, pool: &'b Pool) -> Box<Iterator<Item=&'a u8>> {
+        let header = get_entry_header(entry, pool);
+        match header.entry_type {
+            MemType::Entry => {
+                Box::new(get_slice(entry, pool).iter())
+            },
+            MemType::Alias => {
+                let children = get_aliased_entries(entry, pool);
+                let iter = children.iter()
+                    .flat_map(move |e| get_iter(e, pool));
+                Box::new(iter)
             }
-        },
-        MemType::Alias => {
-            let first_entry = &get_aliased_entries(entry, pool)[0];
-            ByteStringIter {
-                entry: entry,
-                pool: pool,
-
-                is_aliased: true,
-                current_page: &pool[first_entry.page_index],
-                current_entry: first_entry,
-                current_string: get_entry_header(first_entry, pool),
-                alias_index: 0,
-                byte_index: 0,
-            }
-        },
-        MemType::Deleted => {
-            panic!("get_iter called on a deleted entry");
-        },
-        _ => {
-            panic!("get_iter called on a {:?} instead of an entry: {:?}", header.entry_type, entry);
-        },
-    }
+            _ => panic!("get_iter called on non-byte-string")
+        }
 }
+
+
+// /// Get the iter over the memory represented by the bytestring
+// pub fn get_iter<'a>(entry: &'a EntryLocation, pool: &'a Pool) -> ByteStringIter<'a> {
+//     let page = &pool[entry.page_index];
+//     let header = get_entry_header(entry, pool);
+//     match header.entry_type {
+//         MemType::Entry => {
+//             ByteStringIter {
+//                 entry: entry,
+//                 pool: pool,
+//
+//                 is_aliased: false,
+//                 current_page: page,
+//                 current_entry: entry,
+//                 current_string: header,
+//                 alias_index: 0,
+//                 byte_index: 0,
+//             }
+//         },
+//         MemType::Alias => {
+//             let first_entry = &get_aliased_entries(entry, pool)[0];
+//             ByteStringIter {
+//                 entry: entry,
+//                 pool: pool,
+//
+//                 is_aliased: true,
+//                 current_page: &pool[first_entry.page_index],
+//                 current_entry: first_entry,
+//                 current_string: get_entry_header(first_entry, pool),
+//                 alias_index: 0,
+//                 byte_index: 0,
+//             }
+//         },
+//         MemType::Deleted => {
+//             panic!("get_iter called on a deleted entry");
+//         },
+//         _ => {
+//             panic!("get_iter called on a {:?} instead of an entry: {:?}", header.entry_type, entry);
+//         },
+//     }
+// }
+
 
 /// ITERATION
 /// Provides byte string iters
 
-pub struct ByteStringIter<'a> {
-    entry: &'a EntryLocation,
-    pool: &'a Pool,
+// pub struct ByteStringIter<'a> {
+//     entry: &'a EntryLocation,
+//     pool: &'a Pool,
+//
+//     is_aliased: bool,
+//     current_page: &'a Page,
+//     current_entry: &'a EntryLocation,
+//     current_string: &'a ByteStringEntry,
+//     alias_index: usize,
+//     byte_index: usize,
+// }
+//
+// impl <'a> Iterator for ByteStringIter<'a> {
+//     type Item = &'a u8;
+//
+//     fn next(&mut self) -> Option<&'a u8> {
+//         // Roll over if necessary
+//         if self.byte_index >= self.current_string.contents_size {
+//             if self.is_aliased {
+//                 self.alias_index += 1;
+//                 let entries = get_aliased_entries(self.entry, self.pool);
+//                 if self.alias_index >= entries.len() {
+//                     return None
+//                 }
+//                 self.current_entry = &entries[self.alias_index];
+//                 self.current_string = self.pool[self.current_entry.page_index]
+//                     .transmute_segment(self.current_entry.offset);
+//                 self.byte_index = 0;
+//                 self.current_page = &self.pool[self.current_entry.page_index];
+//             } else {
+//                 return None
+//             }
+//         }
+//         let current_byte = &self.current_page
+//             [self.current_entry.offset+*BSE_HEADER_SIZE+self.byte_index];
+//         self.byte_index += 1;
+//         Some(current_byte)
+//     }
+// }
 
-    is_aliased: bool,
-    current_page: &'a Page,
-    current_entry: &'a EntryLocation,
-    current_string: &'a ByteStringEntry,
-    alias_index: usize,
-    byte_index: usize,
-}
+#[test]
+fn test_multilevel_aliasing() {
+    // I need 1 top node, 255 intermediate nodes, and 510 leaf nodes
+    let mut buf = vec![0u8; 0x2F_E0_00];
+    let pool = Pool::new(&mut buf[..]);
 
-impl <'a> Iterator for ByteStringIter<'a> {
-    type Item = &'a u8;
+    // MAX_ALIASES_PER_CHUNK=254, this should take up 257 pages
+    let test_contents = vec![42u8; 0xFE808];
+    let num_chunks = calc_num_chunks(test_contents.len());
+    assert_eq!(257, num_chunks);
 
-    fn next(&mut self) -> Option<&'a u8> {
-        // Roll over if necessary
-        if self.byte_index >= self.current_string.contents_size {
-            if self.is_aliased {
-                self.alias_index += 1;
-                let entries = get_aliased_entries(self.entry, self.pool);
-                if self.alias_index >= entries.len() {
-                    return None
-                }
-                self.current_entry = &entries[self.alias_index];
-                self.current_string = self.pool[self.current_entry.page_index]
-                    .transmute_segment(self.current_entry.offset);
-                self.byte_index = 0;
-                self.current_page = &self.pool[self.current_entry.page_index];
-            } else {
-                return None
-            }
-        }
-        let current_byte = &self.current_page
-            [self.current_entry.offset+*BSE_HEADER_SIZE+self.byte_index];
-        self.byte_index += 1;
-        Some(current_byte)
+    let top_loc = alloc_with_contents(NO_HINT, &test_contents[..], &pool).unwrap();
+    let top_header = get_entry_header(&top_loc, &pool);
+    assert_eq!(255, top_header.contents_size);
+    assert_eq!(MemType::Alias, top_header.entry_type);
+
+    let mid_loc_1 = get_aliased_entries(&top_loc, 0, &pool)[0];
+    let mid_header_1 = get_entry_header(&mid_loc_1, &pool);
+    assert_eq!(MemType::Alias, mid_header_1.entry_type);
+    assert_eq!(2, mid_header_1.contents_size);
+
+    let leaf_loc_1 = get_aliased_entries(mid_loc_1, 0, &pool)[0];
+    let leaf_header_1 = get_entry_header(&leaf_loc_1, &pool);
+    assert_eq!(MemType::Entry, leaf_header_1.entry_type);
+    assert_eq!(*BSE_CHUNK_SIZE, leaf_header_1.contents_size);
+
+    for u in get_iter(&top_loc, &pool) {
+        assert_eq!(42u8, *u);
     }
+
+    let count = get_iter(&top_loc, &pool).count();
+    assert_eq!(0xFE808, count);
 }
 
 #[test]
@@ -306,9 +369,11 @@ fn test_alias_alloc_with_contents() {
 
     // Should take up 4 pages
     let test_contents = [42u8; 0x3000];
-    assert_eq!(4, calc_num_chunks(test_contents.len()));
+    let num_chunks = calc_num_chunks(test_contents.len());
+    assert_eq!(4, num_chunks);
 
-    let alias_loc = alias_alloc_with_contents(&test_contents[..], &pool).unwrap();
+    let alias_loc = alias_alloc_with_contents(
+        &test_contents[..], num_chunks, *BSE_CHUNK_SIZE, &pool).unwrap();
     let alias_header = get_entry_header(&alias_loc, &pool);
 
     assert_eq!(4, alias_header.contents_size);
@@ -338,8 +403,8 @@ fn test_alias_alloc_with_contents() {
     assert_eq!(0x3000, count);
 
     // Test error case
-    assert_eq!(Err("OOM"),
-        alias_alloc_with_contents(&test_contents[..], &pool));
+    assert_eq!(Err("OOM"), alias_alloc_with_contents(
+        &test_contents[..], num_chunks, *BSE_CHUNK_SIZE, &pool));
 }
 
 #[test]
@@ -349,16 +414,19 @@ fn test_alias_alloc_then_free() {
 
     // Should take up 4 pages
     let test_contents = [42u8; 0x3000];
-    assert_eq!(4, calc_num_chunks(test_contents.len()));
+    let num_chunks = calc_num_chunks(test_contents.len());
+    assert_eq!(4, num_chunks);
 
-    let alias_loc = alias_alloc_with_contents(&test_contents[..], &pool).unwrap();
+    let alias_loc = alias_alloc_with_contents(
+        &test_contents[..], num_chunks, *BSE_CHUNK_SIZE, &pool).unwrap();
 
     // This should be the only reference on the memory
     release_byte_string(&alias_loc, &pool);
     assert_eq!(0, pool.get_ref_count(alias_loc.page_index));
 
     // So we should be able to re-use the memory it used to hold
-    assert!(alias_alloc_with_contents(&test_contents[..], &pool).is_ok());
+    assert!(alias_alloc_with_contents(
+        &test_contents[..], num_chunks, *BSE_CHUNK_SIZE, &pool).is_ok());
 }
 
 #[test]

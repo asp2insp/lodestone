@@ -20,6 +20,8 @@ lazy_static! {
     pub static ref BSE_HEADER_SIZE: usize = mem::size_of::<ByteStringEntry>();
     pub static ref BSE_CHUNK_SIZE: usize = PAGE_SIZE - *BSE_HEADER_SIZE;
     pub static ref EL_PTR_SIZE: usize = mem::size_of::<EntryLocation>();
+    pub static ref MAX_ALIASES_PER_CHUNK: usize = *BSE_CHUNK_SIZE / *EL_PTR_SIZE;
+    pub static ref ALIASED_BSE_MAX_SIZE: usize = *MAX_ALIASES_PER_CHUNK * *BSE_CHUNK_SIZE;
 }
 
 /// Maps arbitrary [u8] to [u8].
@@ -34,7 +36,7 @@ pub struct BTree {
 /// Public API
 impl BTree {
     pub fn new(buf: &mut [u8]) -> BTree {
-        let mut page_pool = Pool::new(buf);
+        let page_pool = Pool::new(buf);
         let mut roots:Vec<EntryLocation> = vec![];
 
         for _ in 0..N {
@@ -44,10 +46,10 @@ impl BTree {
             });
         }
 
-        for root in &roots {
-            NodeHeader::from_entry(root, &mut page_pool)
-                .init(root.page_index, 0, MemType::Root);
-        }
+        // for root in &roots {
+        //     NodeHeader::from_entry(root, &mut page_pool)
+        //         .init(root.page_index, 0, MemType::Root);
+        // }
 
         BTree {
             page_pool: page_pool,

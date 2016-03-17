@@ -35,16 +35,6 @@ impl NodeHeader {
     pub fn from_entry<'a>(e: &EntryLocation, pool: &'a Pool) -> &'a mut NodeHeader {
         pool[e.page_index].borrow_mut().transmute_page_mut::<NodeHeader>()
     }
-
-    /// Perform initial setup, such as fixing the keys/children arrays,
-    /// setting the tx_id
-    pub fn init(&mut self, page_index: usize, tx: usize, node_type: MemType) {
-        self.page_index = page_index;
-        self.num_keys = 0;
-        self.num_children = 0;
-        self.node_type = node_type;
-        self.tx_id = tx;
-    }
 }
 
 /// Private interface
@@ -203,6 +193,16 @@ impl NodeHeader {
             .map(|b| b as char)
             .collect();
         result
+    }
+
+    /// Perform initial setup, such as fixing the keys/children arrays,
+    /// setting the tx_id
+    fn init(&mut self, page_index: usize, tx: usize, node_type: MemType) {
+        self.page_index = page_index;
+        self.num_keys = 0;
+        self.num_children = 0;
+        self.node_type = node_type;
+        self.tx_id = tx;
     }
 }
 
