@@ -2,6 +2,6 @@
 #[macro_use]
 extern crate lazy_static;
 
-mod allocator;
+pub mod allocator;
 
-mod slicebtree;
+// mod slicebtree;
