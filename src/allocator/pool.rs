@@ -2,21 +2,27 @@ use std::{ptr, mem, fmt};
 use std::sync::atomic::{AtomicUsize, AtomicBool};
 use std::sync::atomic::Ordering::{SeqCst};
 
+use super::arc::*;
+
 pub const PAGE_SIZE: usize = 4096;
 pub const BUFFER_END: usize = !0 as usize;
 
 lazy_static! {
     pub static ref HEADER_SIZE: usize = mem::size_of::<SkipListEntry>();
     pub static ref FIRST_OR_SINGLE_CONTENT_SIZE: usize = PAGE_SIZE - *HEADER_SIZE;
-    pub static ref ARC_INNER_SIZE: usize = mem::size_of::<ArcInner>();
     pub static ref OVERHEAD: usize = *HEADER_SIZE + *ARC_INNER_SIZE;
 }
 
 pub struct Pool {
     buffer: *mut u8,
     buffer_size: usize,
+}
 
-    // cached values
+#[derive(Debug)]
+struct Metadata {
+    // TODO rip this out and replace with a free list
+    // We probably want to keep 2 free lists -- A one-page
+    // list and a larger objects list to avoid fragmentation
     lowest_known_free_index: usize,
 }
 
@@ -24,24 +30,9 @@ impl fmt::Debug for Pool {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Pool")
             .field("buffer_size", &self.buffer_size)
-            .field("lowest_known_free_index", &self.lowest_known_free_index)
+            .field("metadata", &self.get_metadata_block())
             .field("blocks", &self.get_debug_blocks())
             .finish()
-    }
-}
-
-
-/// Arcs are free floating and are not persisted
-pub struct Arc {
-    _ptr: *mut ArcInner,
-}
-
-impl Arc {
-    fn new(inner: &mut ArcInner) -> Arc {
-        inner.strong.fetch_add(1, SeqCst);
-        Arc {
-            _ptr: inner as *mut ArcInner,
-        }
     }
 }
 
@@ -51,20 +42,13 @@ impl Pool {
         let p = Pool {
             buffer: ptr,
             buffer_size: buf.len(),
-            lowest_known_free_index: 0,
         };
-        let last_skip_index = p.buffer_size - *HEADER_SIZE;
+        // Last page is metadata and not usable as a full page-aligned chunk anyway
+        let last_skip_index = p.buffer_size - PAGE_SIZE;
         p.make_skip_entry(SkipListStart(last_skip_index), 0, BUFFER_END, false);
         p.make_skip_entry(SkipListStart(0), BUFFER_END, last_skip_index, true);
         p
     }
-}
-
-/// ArcInners live inside of the buffer and are persisted
-struct ArcInner {
-    strong: AtomicUsize,
-    weak: AtomicUsize,
-    size: usize,
 }
 
 struct SkipListEntry {
@@ -80,12 +64,17 @@ enum IndexType {
     SkipListStart(usize),
 }
 
-/// Private interface
+/// Public interface
 impl Pool {
-    fn malloc(&mut self, size: usize) -> Arc {
+    pub fn malloc<T: Sized>(&self, data: T) -> Arc<T> {
+        let size = mem::size_of::<T>();
         let chunked_size = round_up_to_nearest_page_size(size);
+        let metadata = self.get_metadata_block();
+        // Claim a block
         let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
-            SkipListStart(self.lowest_known_free_index));
+            SkipListStart(metadata.lowest_known_free_index));
+        entry.is_free.store(false, SeqCst);
+
         let next_index = free_block_index + chunked_size;
         let following_index = entry.next.load(SeqCst);
         assert!(next_index <= following_index);
@@ -97,20 +86,63 @@ impl Pool {
             following_entry.prev.store(next_index, SeqCst);
             entry.next.store(next_index, SeqCst);
         }
-        let inner = self.get_arc_inner(SkipListStart(free_block_index));
-        inner.strong.store(0, SeqCst);
-        inner.weak.store(0, SeqCst);
-        inner.size = size;
-        Arc::new(inner)
-    }
-    //
-    // fn free(&mut self, arc: Arc) {
-    //
-    // }
 
+        // Update known free index if necessary (only necessary if we've used the lowest)
+        if free_block_index == metadata.lowest_known_free_index {
+            let (idx, _) = self.next_free_block_larger_than(0, SkipListStart(free_block_index));
+            metadata.lowest_known_free_index = idx;
+        }
+
+        let inner = self.index_to_arc_inner(SkipListStart(free_block_index));
+        inner.init(data);
+        Arc::new(inner, self)
+    }
+
+    pub fn free<T>(&self, arc: &Arc<T>) {
+        let metadata = self.get_metadata_block();
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        let (this_idx, header) = self.header_for_byte_index(arc_index);
+        let prev_idx = header.prev.load(SeqCst);
+        let next_idx = header.next.load(SeqCst);
+        let (_, prev) = self.header_for_byte_index(SkipListStart(prev_idx));
+        let (_, next) = self.header_for_byte_index(SkipListStart(next_idx));
+
+        header.is_free.store(true, SeqCst);
+        if next.is_free.load(SeqCst) {
+            // Merge with the next item, by encompassing it
+            let next_next_idx = next.next.load(SeqCst);
+            header.next.store(next_next_idx, SeqCst)
+        }
+        if prev.is_free.load(SeqCst) {
+            // Merge by swallong this item with the previous item
+            let next_idx = header.next.load(SeqCst);
+            prev.next.store(next_idx, SeqCst);
+        } else {
+            // Update known free index if necessary
+            if this_idx < metadata.lowest_known_free_index {
+                metadata.lowest_known_free_index = this_idx;
+            }
+        }
+    }
+
+    pub fn deref<'a, T>(&'a self, arc: &'a Arc<T>) -> &'a T {
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        self.index_to_arc_inner(arc_index).data
+    }
+}
+
+/// Private interface
+impl Pool {
+    /// Get the metadata block, which always lives in the last page of the array
+    fn get_metadata_block<'a>(&'a self) -> &'a mut Metadata {
+        let metadata_index = self.buffer_size - PAGE_SIZE + *HEADER_SIZE;
+        unsafe {
+            mem::transmute(self.byte_index_to_live_ptr(metadata_index))
+        }
+    }
 
     /// Get the arc inner for a given index
-    fn get_arc_inner<'a>(&'a self, index: IndexType) -> &'a mut ArcInner {
+    fn index_to_arc_inner<'a, T>(&'a self, index: IndexType) -> &'a mut ArcInner<T> {
         let offset = match index {
             ArcStart(i) => i ,
             DataStart(i) => i - *ARC_INNER_SIZE,
@@ -122,6 +154,14 @@ impl Pool {
         }
     }
 
+    /// Get the arc inner for a given arc outer
+    fn arc_to_arc_inner_index<'a, T>(&'a self, arc: &Arc<T>) -> IndexType {
+        unsafe {
+            let ptr: *mut u8 = mem::transmute(arc._ptr);
+            ArcStart(self.live_ptr_to_byte_index(ptr))
+        }
+    }
+
     /// Does not take overhead into account
     fn next_free_block_larger_than<'a>(&'a self, size: usize, start_index: IndexType) -> (usize, &'a mut SkipListEntry) {
         let (idx, mut entry) = self.header_for_byte_index(start_index);
@@ -130,7 +170,11 @@ impl Pool {
             (idx, entry)
         } else {
             let next_index = entry.next.load(SeqCst);
-            self.next_free_block_larger_than(size, SkipListStart(next_index))
+            if next_index != BUFFER_END {
+                self.next_free_block_larger_than(size, SkipListStart(next_index))
+            } else {
+                (BUFFER_END, entry)
+            }
         }
     }
 
@@ -244,14 +288,47 @@ pub fn round_up_to_nearest_page_size(size: usize) -> usize {
 mod tests {
     use super::*;
 
+    struct TestStruct {
+        a: usize,
+        b: isize,
+        c: bool,
+    }
+
     #[test]
     fn test_printing_empty() {
-        let mut buf: [u8; 0x1000] = [0; 0x1000];
+        let mut buf: [u8; 0x2000] = [0; 0x2000];
         let p = Pool::new(&mut buf[..]);
         assert_eq!(
-            "Pool { buffer_size: 4096, lowest_known_free_index: 0, blocks: \
-                [_B { start: 0, size: 4024, is_free: true }] }",
+            "Pool { buffer_size: 8192, \
+                metadata: Metadata { lowest_known_free_index: 0 }, \
+                blocks: [_B { start: 0, size: 4056, is_free: true }] }",
             format!("{:?}", p)
         );
+    }
+
+    #[test]
+    fn test_small_alloc_free() {
+        let mut buf: [u8; 0x2000] = [0; 0x2000];
+        let p = Pool::new(&mut buf[..]);
+
+        let ts1 = TestStruct {
+            a: 12345,
+            b: -678,
+            c: true,
+        };
+        let arc_ts1 = p.malloc(ts1);
+
+        assert_eq!(
+            "Pool { buffer_size: 8192, \
+                metadata: Metadata { lowest_known_free_index: 18446744073709551615 }, \
+                blocks: [_B { start: 0, size: 4056, is_free: false }] }",
+            format!("{:?}", p)
+        );
+        
+        //
+        // assert_eq!(12345, arc_ts1.a);
+        // assert_eq!(-678, arc_ts1.b);
+        // assert_eq!(true, arc_ts1.c);
+
     }
 }

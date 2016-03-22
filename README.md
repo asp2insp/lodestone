@@ -2,6 +2,7 @@
  * Rewrite pool to be a traditional malloc/free impl over a non-segmented set of bytes. Smallest allowed chunk is a PAGE_SIZE.
  * Use Arc semantics to alloc/free memory. Arcs are backed by an entry in the refs_page, so that they're persistent.
   * Follow std Arc pattern which stores the counters next to the data as ArcInner. Use relative pointers for the outer.
+  * Make Arcs typed!
  * This lets us switch to a slice-based or pointer-based API.
 
 
