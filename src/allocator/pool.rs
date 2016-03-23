@@ -51,6 +51,7 @@ impl Pool {
     }
 }
 
+#[derive(Debug)]
 struct SkipListEntry {
     prev: AtomicUsize, // absolute buffer offset of previous SKE
     is_free: AtomicBool, // Whether the given memory is free
@@ -58,6 +59,7 @@ struct SkipListEntry {
 }
 
 use self::IndexType::*;
+#[derive(Debug)]
 enum IndexType {
     ArcStart(usize),
     DataStart(usize),
@@ -81,7 +83,7 @@ impl Pool {
         // If we split a block, then we need to make a new entry
         if next_index < following_index {
             self.make_skip_entry(SkipListStart(next_index),
-                following_index, free_block_index, true);
+                free_block_index, following_index, true);
             let (_, following_entry) = self.header_for_byte_index(SkipListStart(following_index));
             following_entry.prev.store(next_index, SeqCst);
             entry.next.store(next_index, SeqCst);
@@ -104,30 +106,35 @@ impl Pool {
         let (this_idx, header) = self.header_for_byte_index(arc_index);
         let prev_idx = header.prev.load(SeqCst);
         let next_idx = header.next.load(SeqCst);
-        let (_, prev) = self.header_for_byte_index(SkipListStart(prev_idx));
-        let (_, next) = self.header_for_byte_index(SkipListStart(next_idx));
 
         header.is_free.store(true, SeqCst);
-        if next.is_free.load(SeqCst) {
-            // Merge with the next item, by encompassing it
-            let next_next_idx = next.next.load(SeqCst);
-            header.next.store(next_next_idx, SeqCst)
+        // Update known free index if necessary
+        if this_idx < metadata.lowest_known_free_index {
+            metadata.lowest_known_free_index = this_idx;
         }
-        if prev.is_free.load(SeqCst) {
-            // Merge by swallong this item with the previous item
-            let next_idx = header.next.load(SeqCst);
-            prev.next.store(next_idx, SeqCst);
-        } else {
-            // Update known free index if necessary
-            if this_idx < metadata.lowest_known_free_index {
-                metadata.lowest_known_free_index = this_idx;
+
+        if next_idx != BUFFER_END {
+            let (_, next) = self.header_for_byte_index(SkipListStart(next_idx));
+            if next.is_free.load(SeqCst) {
+                // Merge with the next item, by encompassing it
+                let next_next_idx = next.next.load(SeqCst);
+                header.next.store(next_next_idx, SeqCst)
+            }
+        }
+        if prev_idx != BUFFER_END {
+            let (_, prev) = self.header_for_byte_index(SkipListStart(prev_idx));
+            if prev.is_free.load(SeqCst) {
+                // Merge by swallong this item with the previous item
+                let next_idx = header.next.load(SeqCst);
+                prev.next.store(next_idx, SeqCst);
             }
         }
     }
 
     pub fn deref<'a, T>(&'a self, arc: &'a Arc<T>) -> &'a T {
         let arc_index = self.arc_to_arc_inner_index(arc);
-        self.index_to_arc_inner(arc_index).data
+        println!("Derefing Arc inner at {:?}", arc_index);
+        &self.index_to_arc_inner(arc_index).data
     }
 }
 
@@ -144,7 +151,7 @@ impl Pool {
     /// Get the arc inner for a given index
     fn index_to_arc_inner<'a, T>(&'a self, index: IndexType) -> &'a mut ArcInner<T> {
         let offset = match index {
-            ArcStart(i) => i ,
+            ArcStart(i) => i,
             DataStart(i) => i - *ARC_INNER_SIZE,
             SkipListStart(i) => i + *HEADER_SIZE,
         };
@@ -188,11 +195,14 @@ impl Pool {
         if offset > self.buffer_size {
             panic!("live_ptr_to_byte_index called with address past end of buffer!");
         }
+        // println!("Converted live address {} to offset {}", obj_addr, offset);
         offset
     }
 
     unsafe fn byte_index_to_live_ptr(&self, byte_index: usize) -> *mut u8 {
-        self.buffer.offset(byte_index as isize)
+        let ptr = self.buffer.offset(byte_index as isize);
+        // println!("Converted offset {} to live address {:?}", byte_index, ptr);
+        ptr
     }
 
     /// Find the skip list entry that precedes the given index's data
@@ -230,12 +240,15 @@ impl Pool {
         loop {
             let (idx, entry) = self.header_for_byte_index(SkipListStart(next_index));
             next_index = entry.next.load(SeqCst);
+            let prev_index = entry.prev.load(SeqCst);
             if next_index == BUFFER_END {
                 break
             }
             ret.push(_B {
                 start: idx,
-                size: next_index - idx - *OVERHEAD,
+                capacity: next_index - idx - *OVERHEAD,
+                next: next_index,
+                prev: prev_index,
                 is_free: entry.is_free.load(SeqCst)
             });
         }
@@ -246,7 +259,9 @@ impl Pool {
 #[derive(Debug)]
 struct _B {
     start: usize,
-    size: usize,
+    capacity: usize,
+    next: usize,
+    prev: usize,
     is_free: bool,
 }
 
@@ -301,34 +316,76 @@ mod tests {
         assert_eq!(
             "Pool { buffer_size: 8192, \
                 metadata: Metadata { lowest_known_free_index: 0 }, \
-                blocks: [_B { start: 0, size: 4056, is_free: true }] }",
+                blocks: [\
+                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: true }\
+                ] }",
             format!("{:?}", p)
         );
     }
 
     #[test]
     fn test_small_alloc_free() {
-        let mut buf: [u8; 0x2000] = [0; 0x2000];
+        let mut buf: [u8; 0x4000] = [0; 0x4000];
         let p = Pool::new(&mut buf[..]);
 
-        let ts1 = TestStruct {
+        let arc_ts1 = p.malloc(TestStruct {
             a: 12345,
             b: -678,
             c: true,
-        };
-        let arc_ts1 = p.malloc(ts1);
+        });
 
         assert_eq!(
-            "Pool { buffer_size: 8192, \
-                metadata: Metadata { lowest_known_free_index: 18446744073709551615 }, \
-                blocks: [_B { start: 0, size: 4056, is_free: false }] }",
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 4096 }, \
+                blocks: [\
+                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: false }, \
+                _B { start: 4096, capacity: 8152, next: 12288, prev: 0, is_free: true }\
+                ] }",
             format!("{:?}", p)
         );
-        
-        //
-        // assert_eq!(12345, arc_ts1.a);
-        // assert_eq!(-678, arc_ts1.b);
-        // assert_eq!(true, arc_ts1.c);
 
+        assert_eq!(12345, arc_ts1.a);
+        assert_eq!(-678, arc_ts1.b);
+        assert_eq!(true, arc_ts1.c);
+
+        let arc_ts2 = p.malloc(TestStruct {
+            a: 12345,
+            b: -678,
+            c: true,
+        });
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 8192 }, \
+                blocks: [\
+                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: false }, \
+                _B { start: 4096, capacity: 4056, next: 8192, prev: 0, is_free: false }, \
+                _B { start: 8192, capacity: 4056, next: 12288, prev: 4096, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
+
+        p.free(&arc_ts1);
+
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 0 }, \
+                blocks: [\
+                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: true }, \
+                _B { start: 4096, capacity: 4056, next: 8192, prev: 0, is_free: false }, \
+                _B { start: 8192, capacity: 4056, next: 12288, prev: 4096, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
+
+        p.free(&arc_ts2);
+
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 0 }, \
+                blocks: [\
+                _B { start: 0, capacity: 12248, next: 12288, prev: 18446744073709551615, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
     }
 }
