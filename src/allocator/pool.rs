@@ -399,4 +399,22 @@ mod tests {
             format!("{:?}", p)
         );
     }
+
+    #[test]
+    fn test_large_alloc_free() {
+        let mut buf: [u8; 0x4000] = [0; 0x4000];
+        let p = Pool::new(&mut buf[..]);
+
+        // Take up 3 pages
+        let arc_ts1 = p.malloc([42u8; 0x2000]);
+
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 18446744073709551615 }, \
+                blocks: [\
+                _B { start: 0, capacity: 12248, next: 12288, prev: 18446744073709551615, is_free: false }\
+                ] }",
+            format!("{:?}", p)
+        );
+    }
 }
