@@ -75,6 +75,9 @@ impl Pool {
         // Claim a block
         let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
             SkipListStart(metadata.lowest_known_free_index));
+        if free_block_index == BUFFER_END {
+            panic!("OOM")
+        }
         entry.is_free.store(false, SeqCst);
 
         let next_index = free_block_index + chunked_size;
@@ -307,6 +310,14 @@ mod tests {
         a: usize,
         b: isize,
         c: bool,
+    }
+
+    #[test]
+    #[should_panic(expected="OOM")]
+    fn test_oom() {
+        let mut buf: [u8; 0x2000] = [0; 0x2000];
+        let p = Pool::new(&mut buf[..]);
+        p.malloc([42; 0x1000]);
     }
 
     #[test]
