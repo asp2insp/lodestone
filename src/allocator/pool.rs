@@ -1,6 +1,6 @@
-use std::{ptr, mem, fmt, slice};
-use std::sync::atomic::{AtomicUsize, AtomicBool};
-use std::sync::atomic::Ordering::{SeqCst};
+use std::{mem, fmt, slice};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::SeqCst;
 
 use super::arc::*;
 
@@ -24,6 +24,7 @@ struct Metadata {
     // We probably want to keep 2 free lists -- A one-page
     // list and a larger objects list to avoid fragmentation
     lowest_known_free_index: usize,
+    next_id_tag: AtomicUsize,
 }
 
 impl fmt::Debug for Pool {
@@ -43,19 +44,25 @@ impl Pool {
             buffer: ptr,
             buffer_size: buf.len(),
         };
-        // Last page is metadata and not usable as a full page-aligned chunk anyway
+        {
+            let metadata = p.get_metadata_block();
+            metadata.lowest_known_free_index = 0;
+            metadata.next_id_tag = AtomicUsize::new(1);
+        }
         let last_skip_index = p.buffer_size - PAGE_SIZE;
-        p.make_skip_entry(SkipListStart(last_skip_index), 0, BUFFER_END, false);
+        // Init head of skip list
         p.make_skip_entry(SkipListStart(0), BUFFER_END, last_skip_index, true);
+        // Last page is metadata and not usable as a full page-aligned chunk anyway
+        p.make_skip_entry(SkipListStart(last_skip_index), 0, BUFFER_END, false);
         p
     }
 }
 
 #[derive(Debug)]
 struct SkipListEntry {
-    prev: AtomicUsize, // absolute buffer offset of previous SKE
-    is_free: AtomicBool, // Whether the given memory is free
-    next: AtomicUsize, // absolute buffer offset of next SKE
+    prev: usize, // absolute buffer offset of previous SKE
+    id_tag: usize, // 0 if the given memory is free, unique id otherwise
+    next: usize, // absolute buffer offset of next SKE
 }
 
 use self::IndexType::*;
@@ -69,27 +76,27 @@ enum IndexType {
 /// Public interface
 impl Pool {
     pub fn malloc(&self, data: &[u8]) -> Result<ArcByteSlice, &'static str> {
-        let size = data.len();
-        let chunked_size = size + *OVERHEAD; // round_up_to_nearest_page_size(size);
+        let chunked_size = data.len() + *OVERHEAD;
         let metadata = self.get_metadata_block();
-        // Claim a block
+        // Try to claim a block
         let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
             SkipListStart(metadata.lowest_known_free_index));
         if free_block_index == BUFFER_END {
             return Err("OOM")
         }
-        entry.is_free.store(false, SeqCst);
+        // Claim as non-free
+        entry.id_tag = metadata.next_id_tag.fetch_add(1, SeqCst);
 
         let next_index = free_block_index + chunked_size;
-        let following_index = entry.next.load(SeqCst);
+        let following_index = entry.next;
         assert!(next_index <= following_index);
         // If we split a block, then we need to make a new entry
         if next_index < following_index {
             self.make_skip_entry(SkipListStart(next_index),
                 free_block_index, following_index, true);
             let (_, following_entry) = self.header_for_byte_index(SkipListStart(following_index));
-            following_entry.prev.store(next_index, SeqCst);
-            entry.next.store(next_index, SeqCst);
+            following_entry.prev = next_index;
+            entry.next = next_index;
         }
 
         // Update known free index if necessary (only necessary if we've used the lowest)
@@ -109,10 +116,10 @@ impl Pool {
         let metadata = self.get_metadata_block();
         let arc_index = self.arc_to_arc_inner_index(arc);
         let (this_idx, header) = self.header_for_byte_index(arc_index);
-        let prev_idx = header.prev.load(SeqCst);
-        let next_idx = header.next.load(SeqCst);
+        let prev_idx = header.prev;
+        let next_idx = header.next;
 
-        header.is_free.store(true, SeqCst);
+        header.id_tag = 0; // Mark as free
         // Update known free index if necessary
         if this_idx < metadata.lowest_known_free_index {
             metadata.lowest_known_free_index = this_idx;
@@ -120,18 +127,18 @@ impl Pool {
 
         if next_idx != BUFFER_END {
             let (_, next) = self.header_for_byte_index(SkipListStart(next_idx));
-            if next.is_free.load(SeqCst) {
+            if next.id_tag == 0 {
                 // Merge with the next item, by encompassing it
-                let next_next_idx = next.next.load(SeqCst);
-                header.next.store(next_next_idx, SeqCst)
+                let next_next_idx = next.next;
+                header.next = next_next_idx;
             }
         }
         if prev_idx != BUFFER_END {
             let (_, prev) = self.header_for_byte_index(SkipListStart(prev_idx));
-            if prev.is_free.load(SeqCst) {
-                // Merge by swallong this item with the previous item
-                let next_idx = header.next.load(SeqCst);
-                prev.next.store(next_idx, SeqCst);
+            if prev.id_tag == 0 {
+                // Merge by swallowing this item with the previous item
+                let next_idx = header.next;
+                prev.next = next_idx;
             }
         }
     }
@@ -151,6 +158,11 @@ impl Pool {
         let arc_index = self.arc_to_arc_inner_index(arc);
         let offset = self.index_to_data_offset(arc_index);
         mem::transmute(self.buffer.offset(offset as isize))
+    }
+
+    pub fn clone_persisted_to_arc(&self, persisted: &PersistedArcByteSlice) -> ArcByteSlice {
+        let inner = self.index_to_arc_inner(ArcByteSliceStart(persisted.arc_inner_index));
+        ArcByteSlice::new(inner, self)
     }
 }
 
@@ -206,16 +218,13 @@ impl Pool {
     /// Does not take overhead into account
     fn next_free_block_larger_than<'a>(&'a self, size: usize, start_index: IndexType) -> (usize, &'a mut SkipListEntry) {
         let (idx, mut entry) = self.header_for_byte_index(start_index);
-        if entry.is_free.load(SeqCst)
-           && (entry.next.load(SeqCst) - idx) >= size {
+        if entry.id_tag == 0
+           && (entry.next - idx) >= size {
             (idx, entry)
+        } else if entry.next != BUFFER_END {
+            self.next_free_block_larger_than(size, SkipListStart(entry.next))
         } else {
-            let next_index = entry.next.load(SeqCst);
-            if next_index != BUFFER_END {
-                self.next_free_block_larger_than(size, SkipListStart(next_index))
-            } else {
-                (BUFFER_END, entry)
-            }
+            (BUFFER_END, entry)
         }
     }
 
@@ -261,9 +270,13 @@ impl Pool {
 
     fn make_skip_entry(&self, index: IndexType, prev: usize, next: usize, is_free: bool) {
         let (_, entry) = self.header_for_byte_index(index);
-        entry.prev.store(prev, SeqCst);
-        entry.next.store(next, SeqCst);
-        entry.is_free.store(is_free, SeqCst);
+        entry.prev = prev;
+        entry.next = next;
+        entry.id_tag = if is_free {
+            0
+        } else {
+            self.get_metadata_block().next_id_tag.fetch_add(1, SeqCst)
+        };
     }
 
     fn get_debug_blocks<'a>(&'a self) -> Vec<_B> {
@@ -271,8 +284,8 @@ impl Pool {
         let mut next_index: usize = 0;
         loop {
             let (idx, entry) = self.header_for_byte_index(SkipListStart(next_index));
-            next_index = entry.next.load(SeqCst);
-            let prev_index = entry.prev.load(SeqCst);
+            next_index = entry.next;
+            let prev_index = entry.prev;
             if next_index == BUFFER_END {
                 break
             }
@@ -281,7 +294,7 @@ impl Pool {
                 capacity: next_index - idx - *OVERHEAD,
                 next: next_index,
                 prev: prev_index,
-                is_free: entry.is_free.load(SeqCst)
+                is_free: entry.id_tag == 0,
             });
         }
         ret
@@ -302,18 +315,12 @@ mod tests {
     use std::mem;
     use super::*;
 
-    struct TestStruct {
-        a: usize,
-        b: isize,
-        c: bool,
-    }
-
     #[test]
     #[should_panic(expected="OOM")]
     fn test_oom() {
         let mut buf: [u8; 0x2000] = [0; 0x2000];
         let p = Pool::new(&mut buf[..]);
-        p.malloc(&[42; 0x1000][..]).unwrap();
+        p.malloc(&[42; 0x2000][..]).unwrap();
     }
 
     #[test]
@@ -322,7 +329,7 @@ mod tests {
         let p = Pool::new(&mut buf[..]);
         assert_eq!(
             "Pool { buffer_size: 8192, \
-                metadata: Metadata { lowest_known_free_index: 0 }, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(1) }, \
                 blocks: [\
                 _B { start: 0, capacity: 4048, next: 4096, prev: 18446744073709551615, is_free: true }\
                 ] }",
@@ -340,7 +347,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 52 }, \
+                metadata: Metadata { lowest_known_free_index: 52, next_id_tag: AtomicUsize(2) }, \
                 blocks: [\
                     _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
                     _B { start: 52, capacity: 12188, next: 12288, prev: 0, is_free: true }\
@@ -353,7 +360,7 @@ mod tests {
         let arc_ts2 = p.malloc(&data[..]).unwrap();
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 104 }, \
+                metadata: Metadata { lowest_known_free_index: 104, next_id_tag: AtomicUsize(3) }, \
                 blocks: [\
                     _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
                     _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
@@ -366,7 +373,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 0 }, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(3) }, \
                 blocks: [\
                     _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: true }, \
                     _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
@@ -379,7 +386,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 0 }, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(3) }, \
                 blocks: [\
                     _B { start: 0, capacity: 12240, next: 12288, prev: 18446744073709551615, is_free: true }\
                 ] }",
@@ -388,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn test_large_alloc_free() {
+    fn test_large_alloc() {
         let mut buf: [u8; 0x4000] = [0; 0x4000];
         let p = Pool::new(&mut buf[..]);
 
@@ -397,7 +404,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 8240 }, \
+                metadata: Metadata { lowest_known_free_index: 8240, next_id_tag: AtomicUsize(2) }, \
                 blocks: [\
                     _B { start: 0, capacity: 8192, next: 8240, prev: 18446744073709551615, is_free: false }, \
                     _B { start: 8240, capacity: 4000, next: 12288, prev: 0, is_free: true }\

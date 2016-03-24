@@ -15,6 +15,8 @@ pub struct ArcByteSlice {
     _pool: *const Pool,
 }
 
+
+/// ArcByteSliceInners are persisted in the mem map
 pub struct ArcByteSliceInner {
     strong: AtomicUsize,
     weak: AtomicUsize,
@@ -80,11 +82,6 @@ impl Deref for ArcByteSlice {
     }
 }
 
-/// Privae Api for ArcByteSlice
-impl  ArcByteSlice {
-
-}
-
 impl  Drop for ArcByteSlice {
     fn drop(&mut self) {
         let inner = self.inner();
@@ -94,5 +91,22 @@ impl  Drop for ArcByteSlice {
                 (*self._pool).free(self);
             }
         }
+    }
+}
+
+/// A PersistedArcByteSlice is a serializable version of an ArcByteSlice
+/// You can freely trade Arcs for PersistedArcs.
+pub struct PersistedArcByteSlice {
+    pub arc_inner_index: usize,
+    id_tag: usize,
+}
+
+impl PersistedArcByteSlice {
+    pub fn clone_to_arc_byte_slice(&self, pool: &Pool) -> ArcByteSlice {
+        pool.clone_persisted_to_arc(self)
+    }
+
+    pub fn release(&self, pool: &Pool) {
+
     }
 }

@@ -24,3 +24,8 @@
  * Clean up special casing for get_iter
  * Change constructor for Pool to consume a vec
  * FIX PAGE DEFINITIONS FOR 32 BIT SYSTEMS
+
+
+## Ideas
+ * swap is_free for a unique tag system
+ * replace single free index with free lists
