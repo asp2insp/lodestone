@@ -1,4 +1,4 @@
-use std::{ptr, mem, fmt};
+use std::{ptr, mem, fmt, slice};
 use std::sync::atomic::{AtomicUsize, AtomicBool};
 use std::sync::atomic::Ordering::{SeqCst};
 
@@ -59,18 +59,18 @@ struct SkipListEntry {
 }
 
 use self::IndexType::*;
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum IndexType {
-    ArcStart(usize),
+    ArcByteSliceStart(usize),
     DataStart(usize),
     SkipListStart(usize),
 }
 
 /// Public interface
 impl Pool {
-    pub fn malloc<T: Sized>(&self, data: T) -> Arc<T> {
-        let size = mem::size_of::<T>();
-        let chunked_size = round_up_to_nearest_page_size(size);
+    pub fn malloc(&self, data: &[u8]) -> ArcByteSlice {
+        let size = data.len();
+        let chunked_size = size + *OVERHEAD; // round_up_to_nearest_page_size(size);
         let metadata = self.get_metadata_block();
         // Claim a block
         let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
@@ -100,10 +100,12 @@ impl Pool {
 
         let inner = self.index_to_arc_inner(SkipListStart(free_block_index));
         inner.init(data);
-        Arc::new(inner, self)
+        let dest = self.index_to_byte_slice_mut(SkipListStart(free_block_index));
+        dest.clone_from_slice(data);
+        ArcByteSlice::new(inner, self)
     }
 
-    pub fn free<T>(&self, arc: &Arc<T>) {
+    pub fn free(&self, arc: &ArcByteSlice) {
         let metadata = self.get_metadata_block();
         let arc_index = self.arc_to_arc_inner_index(arc);
         let (this_idx, header) = self.header_for_byte_index(arc_index);
@@ -134,10 +136,10 @@ impl Pool {
         }
     }
 
-    pub fn deref<'a, T>(&'a self, arc: &'a Arc<T>) -> &'a T {
+    pub fn deref<'a>(&'a self, arc: &'a ArcByteSlice) -> &'a [u8] {
         let arc_index = self.arc_to_arc_inner_index(arc);
-        println!("Derefing Arc inner at {:?}", arc_index);
-        &self.index_to_arc_inner(arc_index).data
+        println!("Derefing ArcByteSlice inner at {:?}", arc_index);
+        self.index_to_byte_slice(arc_index)
     }
 }
 
@@ -151,10 +153,36 @@ impl Pool {
         }
     }
 
-    /// Get the arc inner for a given index
-    fn index_to_arc_inner<'a, T>(&'a self, index: IndexType) -> &'a mut ArcInner<T> {
+    /// Get the byte_slice corresponding to an index
+    fn index_to_byte_slice<'a>(&'a self, index: IndexType) -> &'a [u8] {
+        let size = self.index_to_arc_inner(index).size;
         let offset = match index {
-            ArcStart(i) => i,
+            ArcByteSliceStart(i) => i + *ARC_INNER_SIZE,
+            DataStart(i) => i,
+            SkipListStart(i) => i + *OVERHEAD,
+        };
+        unsafe {
+            slice::from_raw_parts(self.buffer.offset(offset as isize), size)
+        }
+    }
+
+    /// Get the byte_slice corresponding to an index
+    fn index_to_byte_slice_mut<'a>(&'a self, index: IndexType) -> &'a mut [u8] {
+        let size = self.index_to_arc_inner(index).size;
+        let offset = match index {
+            ArcByteSliceStart(i) => i + *ARC_INNER_SIZE,
+            DataStart(i) => i,
+            SkipListStart(i) => i + *OVERHEAD,
+        };
+        unsafe {
+            slice::from_raw_parts_mut(self.buffer.offset(offset as isize), size)
+        }
+    }
+
+    /// Get the arc inner for a given index
+    fn index_to_arc_inner<'a>(&'a self, index: IndexType) -> &'a mut ArcByteSliceInner {
+        let offset = match index {
+            ArcByteSliceStart(i) => i,
             DataStart(i) => i - *ARC_INNER_SIZE,
             SkipListStart(i) => i + *HEADER_SIZE,
         };
@@ -165,10 +193,10 @@ impl Pool {
     }
 
     /// Get the arc inner for a given arc outer
-    fn arc_to_arc_inner_index<'a, T>(&'a self, arc: &Arc<T>) -> IndexType {
+    fn arc_to_arc_inner_index<'a>(&'a self, arc: &ArcByteSlice) -> IndexType {
         unsafe {
             let ptr: *mut u8 = mem::transmute(arc._ptr);
-            ArcStart(self.live_ptr_to_byte_index(ptr))
+            ArcByteSliceStart(self.live_ptr_to_byte_index(ptr))
         }
     }
 
@@ -211,22 +239,12 @@ impl Pool {
     /// Find the skip list entry that precedes the given index's data
     fn header_for_byte_index<'a>(&'a self, index: IndexType) -> (usize, &'a mut SkipListEntry) {
         let offset = match index {
-            ArcStart(i) => i - *HEADER_SIZE,
+            ArcByteSliceStart(i) => i - *HEADER_SIZE,
             DataStart(i) => i - *ARC_INNER_SIZE - *HEADER_SIZE,
             SkipListStart(i) => i,
         };
         unsafe {
             (offset, mem::transmute(self.buffer.offset(offset as isize)))
-        }
-    }
-
-    /// Find the skip list entry that follows the given index's data
-    fn footer_for_byte_index<'a>(&'a self, index: IndexType) -> (usize, &'a mut SkipListEntry) {
-        let (_, entry) = self.header_for_byte_index(index);
-        unsafe {
-            let next_index = entry.next.load(SeqCst);
-            let ptr = self.byte_index_to_live_ptr(next_index);
-            (next_index, mem::transmute(ptr))
         }
     }
 
@@ -304,6 +322,7 @@ pub fn round_up_to_nearest_page_size(size: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
     use super::*;
 
     struct TestStruct {
@@ -317,7 +336,7 @@ mod tests {
     fn test_oom() {
         let mut buf: [u8; 0x2000] = [0; 0x2000];
         let p = Pool::new(&mut buf[..]);
-        p.malloc([42; 0x1000]);
+        p.malloc(&[42; 0x1000][..]);
     }
 
     #[test]
@@ -328,7 +347,7 @@ mod tests {
             "Pool { buffer_size: 8192, \
                 metadata: Metadata { lowest_known_free_index: 0 }, \
                 blocks: [\
-                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: true }\
+                _B { start: 0, capacity: 4048, next: 4096, prev: 18446744073709551615, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );
@@ -338,39 +357,30 @@ mod tests {
     fn test_small_alloc_free() {
         let mut buf: [u8; 0x4000] = [0; 0x4000];
         let p = Pool::new(&mut buf[..]);
+        let data = [0x1, 0x2, 0x3, 0x4];
 
-        let arc_ts1 = p.malloc(TestStruct {
-            a: 12345,
-            b: -678,
-            c: true,
-        });
+        let arc_ts1 = p.malloc(&data[..]);
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 4096 }, \
+                metadata: Metadata { lowest_known_free_index: 52 }, \
                 blocks: [\
-                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: false }, \
-                _B { start: 4096, capacity: 8152, next: 12288, prev: 0, is_free: true }\
+                    _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 52, capacity: 12188, next: 12288, prev: 0, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );
 
-        assert_eq!(12345, arc_ts1.a);
-        assert_eq!(-678, arc_ts1.b);
-        assert_eq!(true, arc_ts1.c);
+        assert_eq!([0x1, 0x2, 0x3, 0x4], arc_ts1[0..4]);
 
-        let arc_ts2 = p.malloc(TestStruct {
-            a: 12345,
-            b: -678,
-            c: true,
-        });
+        let arc_ts2 = p.malloc(&data[..]);
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 8192 }, \
+                metadata: Metadata { lowest_known_free_index: 104 }, \
                 blocks: [\
-                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: false }, \
-                _B { start: 4096, capacity: 4056, next: 8192, prev: 0, is_free: false }, \
-                _B { start: 8192, capacity: 4056, next: 12288, prev: 4096, is_free: true }\
+                    _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
+                    _B { start: 104, capacity: 12136, next: 12288, prev: 52, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );
@@ -381,9 +391,9 @@ mod tests {
             "Pool { buffer_size: 16384, \
                 metadata: Metadata { lowest_known_free_index: 0 }, \
                 blocks: [\
-                _B { start: 0, capacity: 4056, next: 4096, prev: 18446744073709551615, is_free: true }, \
-                _B { start: 4096, capacity: 4056, next: 8192, prev: 0, is_free: false }, \
-                _B { start: 8192, capacity: 4056, next: 12288, prev: 4096, is_free: true }\
+                    _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: true }, \
+                    _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
+                    _B { start: 104, capacity: 12136, next: 12288, prev: 52, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );
@@ -394,7 +404,7 @@ mod tests {
             "Pool { buffer_size: 16384, \
                 metadata: Metadata { lowest_known_free_index: 0 }, \
                 blocks: [\
-                _B { start: 0, capacity: 12248, next: 12288, prev: 18446744073709551615, is_free: true }\
+                    _B { start: 0, capacity: 12240, next: 12288, prev: 18446744073709551615, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );
@@ -406,13 +416,14 @@ mod tests {
         let p = Pool::new(&mut buf[..]);
 
         // Take up 3 pages
-        let arc_ts1 = p.malloc([42u8; 0x2000]);
+        let arc_ts1 = p.malloc(&[42u8; 0x2000][..]);
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 18446744073709551615 }, \
+                metadata: Metadata { lowest_known_free_index: 8240 }, \
                 blocks: [\
-                _B { start: 0, capacity: 12248, next: 12288, prev: 18446744073709551615, is_free: false }\
+                    _B { start: 0, capacity: 8192, next: 8240, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 8240, capacity: 4000, next: 12288, prev: 0, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );

@@ -236,7 +236,7 @@ fn release_frees() {
        let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
        let p = Pool::new(&mut buf[..]);
 
-       // Use claim_free_index so that the Arc doesn't drop
+       // Use claim_free_index so that the ArcByteSlice doesn't drop
        // the reference immediately
        assert!(p.claim_free_index().is_ok());
        assert!(p.claim_free_index().is_ok());
