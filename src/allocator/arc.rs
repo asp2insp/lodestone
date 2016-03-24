@@ -38,6 +38,20 @@ impl ArcByteSlice {
         // that the inner pointer is valid.
         unsafe { &*self._ptr }
     }
+
+    pub fn deref_as<'a, T>(&'a self) -> &'a T {
+        assert_eq!(self.inner().size, mem::size_of::<T>());
+        unsafe {
+            (*self._pool).deref_as(self)
+        }
+    }
+
+    pub fn deref_as_mut<'a, T>(&'a self) -> &'a mut T {
+        assert_eq!(self.inner().size, mem::size_of::<T>());
+        unsafe {
+            (*self._pool).deref_as_mut(self)
+        }
+    }
 }
 
 /// Public Api for ArcByteSliceInner

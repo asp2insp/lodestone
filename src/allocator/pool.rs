@@ -138,8 +138,19 @@ impl Pool {
 
     pub fn deref<'a>(&'a self, arc: &'a ArcByteSlice) -> &'a [u8] {
         let arc_index = self.arc_to_arc_inner_index(arc);
-        println!("Derefing ArcByteSlice inner at {:?}", arc_index);
         self.index_to_byte_slice(arc_index)
+    }
+
+    pub unsafe fn deref_as<'a, T>(&'a self, arc: &'a ArcByteSlice) -> &'a T {
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        let offset = self.index_to_data_offset(arc_index);
+        mem::transmute(self.buffer.offset(offset as isize))
+    }
+
+    pub unsafe fn deref_as_mut<'a, T>(&'a self, arc: &'a ArcByteSlice) -> &'a mut T {
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        let offset = self.index_to_data_offset(arc_index);
+        mem::transmute(self.buffer.offset(offset as isize))
     }
 }
 
@@ -156,11 +167,7 @@ impl Pool {
     /// Get the byte_slice corresponding to an index
     fn index_to_byte_slice<'a>(&'a self, index: IndexType) -> &'a [u8] {
         let size = self.index_to_arc_inner(index).size;
-        let offset = match index {
-            ArcByteSliceStart(i) => i + *ARC_INNER_SIZE,
-            DataStart(i) => i,
-            SkipListStart(i) => i + *OVERHEAD,
-        };
+        let offset = self.index_to_data_offset(index);
         unsafe {
             slice::from_raw_parts(self.buffer.offset(offset as isize), size)
         }
@@ -169,11 +176,7 @@ impl Pool {
     /// Get the byte_slice corresponding to an index
     fn index_to_byte_slice_mut<'a>(&'a self, index: IndexType) -> &'a mut [u8] {
         let size = self.index_to_arc_inner(index).size;
-        let offset = match index {
-            ArcByteSliceStart(i) => i + *ARC_INNER_SIZE,
-            DataStart(i) => i,
-            SkipListStart(i) => i + *OVERHEAD,
-        };
+        let offset = self.index_to_data_offset(index);
         unsafe {
             slice::from_raw_parts_mut(self.buffer.offset(offset as isize), size)
         }
@@ -234,6 +237,14 @@ impl Pool {
         let ptr = self.buffer.offset(byte_index as isize);
         // println!("Converted offset {} to live address {:?}", byte_index, ptr);
         ptr
+    }
+
+    fn index_to_data_offset(&self, index: IndexType) -> usize {
+        match index {
+            ArcByteSliceStart(i) => i + *ARC_INNER_SIZE,
+            DataStart(i) => i,
+            SkipListStart(i) => i + *OVERHEAD,
+        }
     }
 
     /// Find the skip list entry that precedes the given index's data
