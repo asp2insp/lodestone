@@ -68,7 +68,7 @@ enum IndexType {
 
 /// Public interface
 impl Pool {
-    pub fn malloc(&self, data: &[u8]) -> ArcByteSlice {
+    pub fn malloc(&self, data: &[u8]) -> Result<ArcByteSlice, &'static str> {
         let size = data.len();
         let chunked_size = size + *OVERHEAD; // round_up_to_nearest_page_size(size);
         let metadata = self.get_metadata_block();
@@ -76,7 +76,7 @@ impl Pool {
         let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
             SkipListStart(metadata.lowest_known_free_index));
         if free_block_index == BUFFER_END {
-            panic!("OOM")
+            return Err("OOM")
         }
         entry.is_free.store(false, SeqCst);
 
@@ -102,7 +102,7 @@ impl Pool {
         inner.init(data);
         let dest = self.index_to_byte_slice_mut(SkipListStart(free_block_index));
         dest.clone_from_slice(data);
-        ArcByteSlice::new(inner, self)
+        Ok(ArcByteSlice::new(inner, self))
     }
 
     pub fn free(&self, arc: &ArcByteSlice) {
@@ -297,40 +297,6 @@ struct _B {
     is_free: bool,
 }
 
-/// Take byte-length and compute the number of pages necessary to hold that many bytes.
-/// Takes the space required for header/footer into account.
-/// # Examples
-/// ```
-/// use lodestone::allocator::pool::*;
-/// assert_eq!(1, calc_num_pages(5));
-/// assert_eq!(1, calc_num_pages(PAGE_SIZE - *HEADER_SIZE));
-/// assert_eq!(2, calc_num_pages(PAGE_SIZE - *HEADER_SIZE + 1));
-/// assert_eq!(3, calc_num_pages(PAGE_SIZE*2));
-/// ```
-pub fn calc_num_pages(size: usize) -> usize {
-    if size <= *FIRST_OR_SINGLE_CONTENT_SIZE {
-        1
-    } else {
-        let tail_size = size - *FIRST_OR_SINGLE_CONTENT_SIZE;
-        let spill = if tail_size % PAGE_SIZE > 0 {1} else {0};
-        1 + tail_size / PAGE_SIZE + spill
-    }
-}
-
-/// Take byte-length and round up to the nearest page's worth of bytes.
-/// Takes overhead into account
-/// # Examples
-/// ```
-/// use lodestone::allocator::pool::*;
-/// assert_eq!(4096, round_up_to_nearest_page_size(5));
-/// assert_eq!(4096, round_up_to_nearest_page_size(PAGE_SIZE - *HEADER_SIZE));
-/// assert_eq!(8192, round_up_to_nearest_page_size(PAGE_SIZE - *HEADER_SIZE + 1));
-/// assert_eq!(12288, round_up_to_nearest_page_size(PAGE_SIZE*2));
-/// ```
-pub fn round_up_to_nearest_page_size(size: usize) -> usize {
-    calc_num_pages(size) * PAGE_SIZE
-}
-
 #[cfg(test)]
 mod tests {
     use std::mem;
@@ -347,7 +313,7 @@ mod tests {
     fn test_oom() {
         let mut buf: [u8; 0x2000] = [0; 0x2000];
         let p = Pool::new(&mut buf[..]);
-        p.malloc(&[42; 0x1000][..]);
+        p.malloc(&[42; 0x1000][..]).unwrap();
     }
 
     #[test]
@@ -370,7 +336,7 @@ mod tests {
         let p = Pool::new(&mut buf[..]);
         let data = [0x1, 0x2, 0x3, 0x4];
 
-        let arc_ts1 = p.malloc(&data[..]);
+        let arc_ts1 = p.malloc(&data[..]).unwrap();
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
@@ -384,7 +350,7 @@ mod tests {
 
         assert_eq!([0x1, 0x2, 0x3, 0x4], arc_ts1[0..4]);
 
-        let arc_ts2 = p.malloc(&data[..]);
+        let arc_ts2 = p.malloc(&data[..]).unwrap();
         assert_eq!(
             "Pool { buffer_size: 16384, \
                 metadata: Metadata { lowest_known_free_index: 104 }, \
@@ -426,8 +392,8 @@ mod tests {
         let mut buf: [u8; 0x4000] = [0; 0x4000];
         let p = Pool::new(&mut buf[..]);
 
-        // Take up 3 pages
-        let arc_ts1 = p.malloc(&[42u8; 0x2000][..]);
+        // Take up > 1 page
+        let arc_ts1 = p.malloc(&[42u8; 0x2000][..]).unwrap();
 
         assert_eq!(
             "Pool { buffer_size: 16384, \

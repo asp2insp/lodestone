@@ -10,18 +10,23 @@ use super::byte_string::*;
 /// The Node exposes a mutable API. Immutability/Append only
 /// is left to the wrapping tree implementation
 
+enum NodeType {
+    Root,
+    Internal,
+    Leaf,
+}
 
 /// The structure of a tree is a series of Nodes.
 /// Each node is made up of at least 1 page.
 /// The first page is interpreted as a NodeHeader
 /// Pages pointed to by the header as data based on the
-/// MemType defined by the header.
-/// If the MemType is Root or Internal, the children
-/// are interpreted as Nodes. If the MemType is Leaf,
+/// NodeType defined by the header.
+/// If the NodeType is Root or Internal, the children
+/// are interpreted as Nodes. If the NodeType is Leaf,
 /// the children are interpreted as the values of the mapping.
 #[repr(C)]
 pub struct NodeHeader {
-    node_type: MemType,
+    node_type: NodeType,
     page_index: usize,
     tx_id: usize,
     num_keys: usize,
@@ -30,16 +35,9 @@ pub struct NodeHeader {
     children: [EntryLocation; B],
 }
 
-/// Public interface
-impl NodeHeader {
-    pub fn from_entry<'a>(e: &EntryLocation, pool: &'a Pool) -> &'a mut NodeHeader {
-        pool[e.page_index].borrow_mut().transmute_page_mut::<NodeHeader>()
-    }
-}
-
 /// Private interface
 impl NodeHeader {
-    fn alloc_node<'a>(node_type: MemType, tx: usize, pool: &'a Pool) -> Result<&'a mut NodeHeader, &'static str> {
+    fn alloc_node<'a>(node_type: NodeType, tx: usize, pool: &'a Pool) -> Result<&'a mut NodeHeader, &'static str> {
         let loc = EntryLocation {
             page_index: try!(pool.alloc()),
             offset: 0,
@@ -174,13 +172,6 @@ impl NodeHeader {
         }
     }
 
-    fn loc(&self) -> EntryLocation {
-        EntryLocation {
-            page_index: self.page_index,
-            offset: 0,
-        }
-    }
-
     fn to_string(&self, pool: &Pool) -> String {
         let result: String = self.leaf_node_get_iter(pool)
             .flat_map(|kv_iters| {
@@ -197,7 +188,7 @@ impl NodeHeader {
 
     /// Perform initial setup, such as fixing the keys/children arrays,
     /// setting the tx_id
-    fn init(&mut self, page_index: usize, tx: usize, node_type: MemType) {
+    fn init(&mut self, page_index: usize, tx: usize, node_type: NodeType) {
         self.page_index = page_index;
         self.num_keys = 0;
         self.num_children = 0;
@@ -215,7 +206,7 @@ impl NodeHeader {
 impl NodeHeader {
     /// Insert in an append only/immutable fashion
     fn leaf_node_insert_non_full<'a>(&'a self, tx_id: usize, key: &[u8], value: &[u8], pool: &'a Pool) -> Result<&'a NodeHeader, &'static str> {
-        assert_eq!(MemType::Leaf, self.node_type);
+        assert_eq!(NodeType::Leaf, self.node_type);
         let page_hint = if self.num_keys > 0 {
             get_page_hint(&self.keys, self.num_keys-1)
         } else {
@@ -244,7 +235,7 @@ impl NodeHeader {
     /// Remove in an append-only/immutable fashion.
     /// Precondition: key must exist. Panics if key does not exist
     fn leaf_node_remove<'a>(&'a self, tx_id: usize, key: &[u8], pool:&'a Pool) -> Result<&'a NodeHeader, &'static str> {
-        assert_eq!(MemType::Leaf, self.node_type);
+        assert_eq!(NodeType::Leaf, self.node_type);
         let index = self.index_of(key, pool);
         if index == NOT_FOUND {
             panic!("The caller is responsible for checking for key existence before calling remove");
@@ -279,7 +270,7 @@ impl NodeHeader {
 
     /// Check to see if the node contains the given key
     fn leaf_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
-        assert_eq!(MemType::Leaf, self.node_type);
+        assert_eq!(NodeType::Leaf, self.node_type);
         self.index_of(key, pool) != NOT_FOUND
     }
 
@@ -359,12 +350,12 @@ fn release_node(entry: &EntryLocation, pool: &Pool) {
 fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
     let node = NodeHeader::from_entry(entry, pool);
     match node.node_type {
-        MemType::Root | MemType::Internal => {
+        NodeType::Root | NodeType::Internal => {
             for e in node.children.iter().take(node.num_children) {
                 release_node(e, pool);
             }
         },
-        MemType::Leaf => {
+        NodeType::Leaf => {
             for e in node.children.iter().take(node.num_children) {
                 release_byte_string(e, pool);
             }
@@ -386,7 +377,7 @@ pub fn free_space_node_page(_: &Page) -> usize {
 fn test_leaf_node_split() {
     let mut buf = [0u8; 0x8000];
     let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let n = NodeHeader::alloc_node(NodeType::Leaf, 0, &pool).unwrap();
     let hello = String::from("hello").into_bytes();
     let world = String::from("world").into_bytes();
     let foo = String::from("foo").into_bytes();
@@ -421,7 +412,7 @@ fn test_leaf_node_split() {
 fn test_leaf_node_remove() {
     let mut buf = [0u8; 0x7000];
     let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let n = NodeHeader::alloc_node(NodeType::Leaf, 0, &pool).unwrap();
     let page_index_1 = n.loc().page_index;
 
     let hello = String::from("hello").into_bytes();
@@ -452,7 +443,7 @@ fn test_leaf_node_remove() {
 fn test_release_leaf_node() {
     let mut buf = [0u8; 0x5000];
     let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let n = NodeHeader::alloc_node(NodeType::Leaf, 0, &pool).unwrap();
     let page_index_1 = n.loc().page_index;
 
     let hello = String::from("hello").into_bytes();
@@ -495,7 +486,7 @@ fn test_release_leaf_node() {
 fn test_insert_internal_non_full() {
     let mut buf = [0u8; 0x4000];
     let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let n = NodeHeader::alloc_node(NodeType::Leaf, 0, &pool).unwrap();
 
     let key = String::from("hello").into_bytes();
     let value = String::from("world").into_bytes();
@@ -520,7 +511,7 @@ fn test_insert_internal_non_full() {
 fn test_insertion_ordering() {
     let mut buf = [0u8; 0x7000];
     let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(MemType::Leaf, 0, &pool).unwrap();
+    let n = NodeHeader::alloc_node(NodeType::Leaf, 0, &pool).unwrap();
 
     let apple = String::from("apple").into_bytes();
     let banana = String::from("banana").into_bytes();

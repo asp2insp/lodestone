@@ -1,7 +1,7 @@
 use std::mem;
 use std::sync::atomic::{AtomicUsize};
 use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 
 use super::pool::*;
 
@@ -39,6 +39,9 @@ impl ArcByteSlice {
         unsafe { &*self._ptr }
     }
 
+    /// Convert the Arc to a reference. Panics if the
+    /// Arc does not point to a correctly sized piece of
+    /// memory.
     pub fn deref_as<'a, T>(&'a self) -> &'a T {
         assert_eq!(self.inner().size, mem::size_of::<T>());
         unsafe {
@@ -46,6 +49,9 @@ impl ArcByteSlice {
         }
     }
 
+    /// Convert the Arc to a reference. Panics if the
+    /// Arc does not point to a correctly sized piece of
+    /// memory.
     pub fn deref_as_mut<'a, T>(&'a self) -> &'a mut T {
         assert_eq!(self.inner().size, mem::size_of::<T>());
         unsafe {
