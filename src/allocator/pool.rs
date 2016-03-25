@@ -1,6 +1,6 @@
 use std::{mem, fmt, slice};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::{SeqCst, Acquire, Release};
 
 use super::arc::*;
 
@@ -75,6 +75,34 @@ enum IndexType {
 
 /// Public interface
 impl Pool {
+    pub fn retain(&self, persist: &PersistedArcByteSlice) -> Result<(), &'static str> {
+        let index = ArcByteSliceStart(persist.arc_inner_index);
+        let (_, header) = self.index_to_skip_list_header(index);
+        if header.id_tag == persist.get_id_tag() {
+            let inner = self.index_to_arc_inner(index);
+            inner.strong.fetch_add(1, Acquire);
+            Ok(())
+        } else {
+            Err("Can't retain. Persisted reference is no longer valid.")
+        }
+    }
+
+    pub fn release(&self, persist: &PersistedArcByteSlice) -> Result<(), &'static str> {
+        let index = ArcByteSliceStart(persist.arc_inner_index);
+        let (_, header) = self.index_to_skip_list_header(index);
+        if header.id_tag == persist.get_id_tag() {
+            let inner = self.index_to_arc_inner(index);
+            let ref_count = inner.strong.fetch_sub(1, Release);
+            if ref_count == 1 {
+                // Last ref, let's release
+                self.free_inner(index);
+            }
+            Ok(())
+        } else {
+            Err("Can't release. Persisted reference is no longer valid.")
+        }
+    }
+
     pub fn malloc(&self, data: &[u8]) -> Result<ArcByteSlice, &'static str> {
         let chunked_size = data.len() + *OVERHEAD;
         let metadata = self.get_metadata_block();
@@ -94,7 +122,7 @@ impl Pool {
         if next_index < following_index {
             self.make_skip_entry(SkipListStart(next_index),
                 free_block_index, following_index, true);
-            let (_, following_entry) = self.header_for_byte_index(SkipListStart(following_index));
+            let (_, following_entry) = self.index_to_skip_list_header(SkipListStart(following_index));
             following_entry.prev = next_index;
             entry.next = next_index;
         }
@@ -113,34 +141,8 @@ impl Pool {
     }
 
     pub fn free(&self, arc: &ArcByteSlice) {
-        let metadata = self.get_metadata_block();
         let arc_index = self.arc_to_arc_inner_index(arc);
-        let (this_idx, header) = self.header_for_byte_index(arc_index);
-        let prev_idx = header.prev;
-        let next_idx = header.next;
-
-        header.id_tag = 0; // Mark as free
-        // Update known free index if necessary
-        if this_idx < metadata.lowest_known_free_index {
-            metadata.lowest_known_free_index = this_idx;
-        }
-
-        if next_idx != BUFFER_END {
-            let (_, next) = self.header_for_byte_index(SkipListStart(next_idx));
-            if next.id_tag == 0 {
-                // Merge with the next item, by encompassing it
-                let next_next_idx = next.next;
-                header.next = next_next_idx;
-            }
-        }
-        if prev_idx != BUFFER_END {
-            let (_, prev) = self.header_for_byte_index(SkipListStart(prev_idx));
-            if prev.id_tag == 0 {
-                // Merge by swallowing this item with the previous item
-                let next_idx = header.next;
-                prev.next = next_idx;
-            }
-        }
+        self.free_inner(arc_index)
     }
 
     pub fn deref<'a>(&'a self, arc: &'a ArcByteSlice) -> &'a [u8] {
@@ -160,14 +162,50 @@ impl Pool {
         mem::transmute(self.buffer.offset(offset as isize))
     }
 
-    pub fn clone_persisted_to_arc(&self, persisted: &PersistedArcByteSlice) -> ArcByteSlice {
-        let inner = self.index_to_arc_inner(ArcByteSliceStart(persisted.arc_inner_index));
-        ArcByteSlice::new(inner, self)
+    pub fn clone_persisted_to_arc(&self, persisted: &PersistedArcByteSlice) -> Result<ArcByteSlice, &'static str> {
+        let index = ArcByteSliceStart(persisted.arc_inner_index);
+        let (_, header) = self.index_to_skip_list_header(index);
+        if header.id_tag == persisted.get_id_tag() {
+            let inner = self.index_to_arc_inner(index);
+            Ok(ArcByteSlice::new(inner, self))
+        } else {
+            Err("Can't convert to Arc. Persisted reference is no longer valid.")
+        }
     }
 }
 
 /// Private interface
 impl Pool {
+    fn free_inner(&self, index: IndexType) {
+        let metadata = self.get_metadata_block();
+        let (this_idx, header) = self.index_to_skip_list_header(index);
+        let prev_idx = header.prev;
+        let next_idx = header.next;
+
+        header.id_tag = 0; // Mark as free
+        // Update known free index if necessary
+        if this_idx < metadata.lowest_known_free_index {
+            metadata.lowest_known_free_index = this_idx;
+        }
+
+        if next_idx != BUFFER_END {
+            let (_, next) = self.index_to_skip_list_header(SkipListStart(next_idx));
+            if next.id_tag == 0 {
+                // Merge with the next item, by encompassing it
+                let next_next_idx = next.next;
+                header.next = next_next_idx;
+            }
+        }
+        if prev_idx != BUFFER_END {
+            let (_, prev) = self.index_to_skip_list_header(SkipListStart(prev_idx));
+            if prev.id_tag == 0 {
+                // Merge by swallowing this item with the previous item
+                let next_idx = header.next;
+                prev.next = next_idx;
+            }
+        }
+    }
+
     /// Get the metadata block, which always lives in the last page of the array
     fn get_metadata_block<'a>(&'a self) -> &'a mut Metadata {
         let metadata_index = self.buffer_size - PAGE_SIZE + *HEADER_SIZE;
@@ -196,11 +234,7 @@ impl Pool {
 
     /// Get the arc inner for a given index
     fn index_to_arc_inner<'a>(&'a self, index: IndexType) -> &'a mut ArcByteSliceInner {
-        let offset = match index {
-            ArcByteSliceStart(i) => i,
-            DataStart(i) => i - *ARC_INNER_SIZE,
-            SkipListStart(i) => i + *HEADER_SIZE,
-        };
+        let offset = self.index_to_arc_offset(index);
         unsafe {
             let ptr = self.byte_index_to_live_ptr(offset);
             mem::transmute(ptr)
@@ -215,9 +249,9 @@ impl Pool {
         }
     }
 
-    /// Does not take overhead into account
+    /// Overhead must already be factored into size
     fn next_free_block_larger_than<'a>(&'a self, size: usize, start_index: IndexType) -> (usize, &'a mut SkipListEntry) {
-        let (idx, mut entry) = self.header_for_byte_index(start_index);
+        let (idx, mut entry) = self.index_to_skip_list_header(start_index);
         if entry.id_tag == 0
            && (entry.next - idx) >= size {
             (idx, entry)
@@ -256,8 +290,16 @@ impl Pool {
         }
     }
 
+    fn index_to_arc_offset(&self, index: IndexType) -> usize {
+        match index {
+            ArcByteSliceStart(i) => i,
+            DataStart(i) => i - *ARC_INNER_SIZE,
+            SkipListStart(i) => i + *HEADER_SIZE,
+        }
+    }
+
     /// Find the skip list entry that precedes the given index's data
-    fn header_for_byte_index<'a>(&'a self, index: IndexType) -> (usize, &'a mut SkipListEntry) {
+    fn index_to_skip_list_header<'a>(&'a self, index: IndexType) -> (usize, &'a mut SkipListEntry) {
         let offset = match index {
             ArcByteSliceStart(i) => i - *HEADER_SIZE,
             DataStart(i) => i - *ARC_INNER_SIZE - *HEADER_SIZE,
@@ -268,8 +310,19 @@ impl Pool {
         }
     }
 
+    /// Priviledged, should not be called outside allocator package
+    pub fn _inner_offset(&self, arc: &ArcByteSlice) -> usize {
+        self.index_to_arc_offset(self.arc_to_arc_inner_index(arc))
+    }
+
+    /// Priviledged, should not be called outside allocator package
+    pub fn _get_id_tag(&self, arc: &ArcByteSlice) -> usize {
+        let (_, header) = self.index_to_skip_list_header(self.arc_to_arc_inner_index(arc));
+        header.id_tag
+    }
+
     fn make_skip_entry(&self, index: IndexType, prev: usize, next: usize, is_free: bool) {
-        let (_, entry) = self.header_for_byte_index(index);
+        let (_, entry) = self.index_to_skip_list_header(index);
         entry.prev = prev;
         entry.next = next;
         entry.id_tag = if is_free {
@@ -283,7 +336,7 @@ impl Pool {
         let mut ret: Vec<_B> = Vec::new();
         let mut next_index: usize = 0;
         loop {
-            let (idx, entry) = self.header_for_byte_index(SkipListStart(next_index));
+            let (idx, entry) = self.index_to_skip_list_header(SkipListStart(next_index));
             next_index = entry.next;
             let prev_index = entry.prev;
             if next_index == BUFFER_END {
@@ -329,7 +382,7 @@ mod tests {
         let p = Pool::new(&mut buf[..]);
         assert_eq!(
             "Pool { buffer_size: 8192, \
-                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(1) }, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(2) }, \
                 blocks: [\
                 _B { start: 0, capacity: 4048, next: 4096, prev: 18446744073709551615, is_free: true }\
                 ] }",
@@ -347,7 +400,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 52, next_id_tag: AtomicUsize(2) }, \
+                metadata: Metadata { lowest_known_free_index: 52, next_id_tag: AtomicUsize(3) }, \
                 blocks: [\
                     _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
                     _B { start: 52, capacity: 12188, next: 12288, prev: 0, is_free: true }\
@@ -360,7 +413,7 @@ mod tests {
         let arc_ts2 = p.malloc(&data[..]).unwrap();
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 104, next_id_tag: AtomicUsize(3) }, \
+                metadata: Metadata { lowest_known_free_index: 104, next_id_tag: AtomicUsize(4) }, \
                 blocks: [\
                     _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
                     _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
@@ -373,7 +426,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(3) }, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(4) }, \
                 blocks: [\
                     _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: true }, \
                     _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
@@ -386,7 +439,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(3) }, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(4) }, \
                 blocks: [\
                     _B { start: 0, capacity: 12240, next: 12288, prev: 18446744073709551615, is_free: true }\
                 ] }",
@@ -404,7 +457,7 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 8240, next_id_tag: AtomicUsize(2) }, \
+                metadata: Metadata { lowest_known_free_index: 8240, next_id_tag: AtomicUsize(3) }, \
                 blocks: [\
                     _B { start: 0, capacity: 8192, next: 8240, prev: 18446744073709551615, is_free: false }, \
                     _B { start: 8240, capacity: 4000, next: 12288, prev: 0, is_free: true }\

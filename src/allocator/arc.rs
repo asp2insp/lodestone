@@ -18,8 +18,8 @@ pub struct ArcByteSlice {
 
 /// ArcByteSliceInners are persisted in the mem map
 pub struct ArcByteSliceInner {
-    strong: AtomicUsize,
-    weak: AtomicUsize,
+    pub strong: AtomicUsize,
+    pub weak: AtomicUsize,
     pub size: usize,
 }
 
@@ -30,6 +30,18 @@ impl ArcByteSlice {
         ArcByteSlice {
             _ptr: inner as *mut ArcByteSliceInner,
             _pool: pool as *const Pool,
+        }
+    }
+
+    pub fn clone_to_persisted(&self) -> PersistedArcByteSlice {
+        let inner = self.inner();
+        // Persisted counts as a strong reference
+        inner.strong.fetch_add(1, SeqCst);
+        unsafe {
+            PersistedArcByteSlice {
+                arc_inner_index: (*self._pool)._inner_offset(&self),
+                id_tag: (*self._pool)._get_id_tag(&self),
+            }
         }
     }
 
@@ -95,18 +107,34 @@ impl  Drop for ArcByteSlice {
 }
 
 /// A PersistedArcByteSlice is a serializable version of an ArcByteSlice
-/// You can freely trade Arcs for PersistedArcs.
+/// You can freely trade Arcs for PersistedArcs and vice versa.
+/// However, you must always manually release the PersistedArcByteSlice
+/// since releasing requires reference to a pool. The Drop impl will panic
+/// if you forget to release the persist.
 pub struct PersistedArcByteSlice {
     pub arc_inner_index: usize,
     id_tag: usize,
 }
 
 impl PersistedArcByteSlice {
-    pub fn clone_to_arc_byte_slice(&self, pool: &Pool) -> ArcByteSlice {
+    pub fn clone_to_arc_byte_slice(&self, pool: &Pool) -> Result<ArcByteSlice, &'static str> {
         pool.clone_persisted_to_arc(self)
     }
 
-    pub fn release(&self, pool: &Pool) {
+    pub fn get_id_tag(&self) -> usize {
+        self.id_tag
+    }
 
+    pub fn release(&mut self, pool: &Pool) -> Result<(), &'static str> {
+        self.id_tag = 0;
+        pool.release(self)
+    }
+}
+
+impl Drop for PersistedArcByteSlice {
+    fn drop(&mut self) {
+        if self.id_tag != 0 {
+            panic!("You MUST call release on a PersistedArcByteSlice before it can be dropped cleanly")
+        }
     }
 }
