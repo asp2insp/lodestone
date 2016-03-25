@@ -83,6 +83,16 @@ impl ArcByteSliceInner {
     }
 }
 
+impl Clone for ArcByteSlice {
+    fn clone(&self) -> ArcByteSlice {
+        self.inner().strong.fetch_add(1, Acquire);
+        ArcByteSlice {
+            _ptr: self._ptr,
+            _pool: self._pool,
+        }
+    }
+}
+
 /// Deref for ArcByteSlice -- No DerefMut since map contents are Read Only.
 impl Deref for ArcByteSlice {
     type Target = [u8];
@@ -123,6 +133,14 @@ impl PersistedArcByteSlice {
 
     pub fn get_id_tag(&self) -> usize {
         self.id_tag
+    }
+
+    pub fn clone(&self, pool: &Pool) -> Result<PersistedArcByteSlice, &'static str> {
+        try!(pool.retain(self));
+        Ok(PersistedArcByteSlice {
+            arc_inner_index: self.arc_inner_index,
+            id_tag: self.id_tag,
+        })
     }
 
     pub fn release(&mut self, pool: &Pool) -> Result<(), &'static str> {
