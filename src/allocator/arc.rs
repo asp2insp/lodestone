@@ -76,10 +76,10 @@ impl ArcByteSlice {
 
 /// Public Api for ArcByteSliceInner
 impl ArcByteSliceInner {
-    pub fn init(&mut self, data: &[u8]) {
+    pub fn init(&mut self, size: usize) {
         self.strong.store(0, SeqCst);
         self.weak.store(0, SeqCst);
-        self.size = data.len();
+        self.size = size;
     }
 }
 
@@ -145,6 +145,7 @@ impl PersistedArcByteSlice {
 
     pub fn release(&mut self, pool: &Pool) -> Result<(), &'static str> {
         self.id_tag = 0;
+        self.arc_inner_index = BUFFER_END;
         pool.release(self)
     }
 }

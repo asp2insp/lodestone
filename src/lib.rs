@@ -4,4 +4,4 @@ extern crate lazy_static;
 
 pub mod allocator;
 
-// mod slicebtree;
+mod slicebtree;

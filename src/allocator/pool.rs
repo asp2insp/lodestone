@@ -103,39 +103,28 @@ impl Pool {
         }
     }
 
+    pub fn make_new<T>(&self) -> Result<ArcByteSlice, &'static str> {
+        let size = mem::size_of::<T>();
+        let (_, inner) = try!(self.malloc_inner(size));
+        Ok(ArcByteSlice::new(inner, self))
+    }
+
+    pub fn clone<T>(&self, from: &T) -> Result<ArcByteSlice, &'static str> {
+        let dest = try!(self.make_new::<T>());
+        let arc_index = self.arc_to_arc_inner_index(&dest);
+        let dest_slice = self.index_to_byte_slice_mut(arc_index);
+        let from_ptr = from as *const T;
+        unsafe {
+            let from_arc = try!(self.live_ptr_to_arc(mem::transmute(from_ptr)));
+            dest_slice.clone_from_slice(&*from_arc);
+        }
+        Ok(dest)
+    }
+
     pub fn malloc(&self, data: &[u8]) -> Result<ArcByteSlice, &'static str> {
-        let chunked_size = data.len() + *OVERHEAD;
-        let metadata = self.get_metadata_block();
-        // Try to claim a block
-        let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
-            SkipListStart(metadata.lowest_known_free_index));
-        if free_block_index == BUFFER_END {
-            return Err("OOM")
-        }
-        // Claim as non-free
-        entry.id_tag = metadata.next_id_tag.fetch_add(1, SeqCst);
-
-        let next_index = free_block_index + chunked_size;
-        let following_index = entry.next;
-        assert!(next_index <= following_index);
-        // If we split a block, then we need to make a new entry
-        if next_index < following_index {
-            self.make_skip_entry(SkipListStart(next_index),
-                free_block_index, following_index, true);
-            let (_, following_entry) = self.index_to_skip_list_header(SkipListStart(following_index));
-            following_entry.prev = next_index;
-            entry.next = next_index;
-        }
-
-        // Update known free index if necessary (only necessary if we've used the lowest)
-        if free_block_index == metadata.lowest_known_free_index {
-            let (idx, _) = self.next_free_block_larger_than(0, SkipListStart(free_block_index));
-            metadata.lowest_known_free_index = idx;
-        }
-
-        let inner = self.index_to_arc_inner(SkipListStart(free_block_index));
-        inner.init(data);
-        let dest = self.index_to_byte_slice_mut(SkipListStart(free_block_index));
+        let size = data.len();
+        let (idx, inner) = try!(self.malloc_inner(size));
+        let dest = self.index_to_byte_slice_mut(idx);
         dest.clone_from_slice(data);
         Ok(ArcByteSlice::new(inner, self))
     }
@@ -176,6 +165,41 @@ impl Pool {
 
 /// Private interface
 impl Pool {
+    fn malloc_inner<'a>(&'a self, size: usize) -> Result<(IndexType, &'a mut ArcByteSliceInner), &'static str> {
+        let chunked_size = size + *OVERHEAD;
+        let metadata = self.get_metadata_block();
+        // Try to claim a block
+        let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
+            SkipListStart(metadata.lowest_known_free_index));
+        if free_block_index == BUFFER_END {
+            return Err("OOM")
+        }
+        // Claim as non-free
+        entry.id_tag = metadata.next_id_tag.fetch_add(1, SeqCst);
+
+        let next_index = free_block_index + chunked_size;
+        let following_index = entry.next;
+        assert!(next_index <= following_index);
+        // If we split a block, then we need to make a new entry
+        if next_index < following_index {
+            self.make_skip_entry(SkipListStart(next_index),
+                free_block_index, following_index, true);
+            let (_, following_entry) = self.index_to_skip_list_header(SkipListStart(following_index));
+            following_entry.prev = next_index;
+            entry.next = next_index;
+        }
+
+        // Update known free index if necessary (only necessary if we've used the lowest)
+        if free_block_index == metadata.lowest_known_free_index {
+            let (idx, _) = self.next_free_block_larger_than(0, SkipListStart(free_block_index));
+            metadata.lowest_known_free_index = idx;
+        }
+
+        let inner = self.index_to_arc_inner(SkipListStart(free_block_index));
+        inner.init(size);
+        Ok((SkipListStart(free_block_index), inner))
+    }
+
     fn free_inner(&self, index: IndexType) {
         let metadata = self.get_metadata_block();
         let (this_idx, header) = self.index_to_skip_list_header(index);
@@ -260,6 +284,12 @@ impl Pool {
         } else {
             (BUFFER_END, entry)
         }
+    }
+
+    fn live_ptr_to_arc(&self, ptr: *const u8) -> Result<ArcByteSlice, &'static str> {
+        let index = DataStart(self.live_ptr_to_byte_index(ptr));
+        let inner = self.index_to_arc_inner(index);
+        Ok(ArcByteSlice::new(inner, self))
     }
 
     fn live_ptr_to_byte_index(&self, ptr: *const u8) -> usize {
