@@ -166,7 +166,7 @@ impl Pool {
 /// Private interface
 impl Pool {
     fn malloc_inner<'a>(&'a self, size: usize) -> Result<(IndexType, &'a mut ArcByteSliceInner), &'static str> {
-        let chunked_size = size + *OVERHEAD;
+        let chunked_size = byte_align(size) + *OVERHEAD;
         let metadata = self.get_metadata_block();
         // Try to claim a block
         let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
@@ -292,7 +292,7 @@ impl Pool {
         Ok(ArcByteSlice::new(inner, self))
     }
 
-    fn live_ptr_to_byte_index(&self, ptr: *const u8) -> usize {
+    pub fn live_ptr_to_byte_index(&self, ptr: *const u8) -> usize {
         let obj_addr = ptr as usize;
         let buf_addr = self.buffer as usize;
         if obj_addr < buf_addr {
@@ -342,12 +342,14 @@ impl Pool {
 
     /// Priviledged, should not be called outside allocator package
     pub fn _inner_offset(&self, arc: &ArcByteSlice) -> usize {
-        self.index_to_arc_offset(self.arc_to_arc_inner_index(arc))
+        let inner_index = self.arc_to_arc_inner_index(arc);
+        self.index_to_arc_offset(inner_index)
     }
 
     /// Priviledged, should not be called outside allocator package
     pub fn _get_id_tag(&self, arc: &ArcByteSlice) -> usize {
-        let (_, header) = self.index_to_skip_list_header(self.arc_to_arc_inner_index(arc));
+        let inner_index = self.arc_to_arc_inner_index(arc);
+        let (_, header) = self.index_to_skip_list_header(inner_index);
         header.id_tag
     }
 
@@ -382,6 +384,12 @@ impl Pool {
         }
         ret
     }
+}
+
+/// Align to the next 8 bytes
+fn byte_align(size: usize) -> usize {
+    let spill = if size % 8 == 0 {0} else {1};
+    8 * (size/8 + spill)
 }
 
 #[derive(Debug)]
@@ -430,10 +438,10 @@ mod tests {
 
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 52, next_id_tag: AtomicUsize(3) }, \
+                metadata: Metadata { lowest_known_free_index: 56, next_id_tag: AtomicUsize(3) }, \
                 blocks: [\
-                    _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
-                    _B { start: 52, capacity: 12188, next: 12288, prev: 0, is_free: true }\
+                    _B { start: 0, capacity: 8, next: 56, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 56, capacity: 12184, next: 12288, prev: 0, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );
@@ -443,11 +451,11 @@ mod tests {
         let arc_ts2 = p.malloc(&data[..]).unwrap();
         assert_eq!(
             "Pool { buffer_size: 16384, \
-                metadata: Metadata { lowest_known_free_index: 104, next_id_tag: AtomicUsize(4) }, \
+                metadata: Metadata { lowest_known_free_index: 112, next_id_tag: AtomicUsize(4) }, \
                 blocks: [\
-                    _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: false }, \
-                    _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
-                    _B { start: 104, capacity: 12136, next: 12288, prev: 52, is_free: true }\
+                    _B { start: 0, capacity: 8, next: 56, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 56, capacity: 8, next: 112, prev: 0, is_free: false }, \
+                    _B { start: 112, capacity: 12128, next: 12288, prev: 56, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );
@@ -458,9 +466,9 @@ mod tests {
             "Pool { buffer_size: 16384, \
                 metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(4) }, \
                 blocks: [\
-                    _B { start: 0, capacity: 4, next: 52, prev: 18446744073709551615, is_free: true }, \
-                    _B { start: 52, capacity: 4, next: 104, prev: 0, is_free: false }, \
-                    _B { start: 104, capacity: 12136, next: 12288, prev: 52, is_free: true }\
+                    _B { start: 0, capacity: 8, next: 56, prev: 18446744073709551615, is_free: true }, \
+                    _B { start: 56, capacity: 8, next: 112, prev: 0, is_free: false }, \
+                    _B { start: 112, capacity: 12128, next: 12288, prev: 56, is_free: true }\
                 ] }",
             format!("{:?}", p)
         );

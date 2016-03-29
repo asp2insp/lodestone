@@ -24,6 +24,7 @@
  * Clean up special casing for get_iter
  * Change constructor for Pool to consume a vec
  * FIX PAGE DEFINITIONS FOR 32 BIT SYSTEMS
+ * Replace &'static str errors with real Error types
 
 
 ## Ideas

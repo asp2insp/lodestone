@@ -1,13 +1,18 @@
-use std::{cmp,iter};
+use std::{cmp,iter,fmt,str};
 use allocator::*;
 
 use super::*;
 
-macro_rules! try_but_panic_in_debug {
-    ($expr:expr) => ({
+macro_rules! recover_but_panic_in_debug {
+    ($expr:expr, $default:expr) => ({
         let t = $expr;
         debug_assert!(t.is_ok());
-        try!(t)
+        match t {
+            Ok(val) => val,
+            Err(_) => {
+                return $default
+            },
+        }
     })
 }
 
@@ -31,6 +36,11 @@ pub struct Node {
     children: [PersistedArcByteSlice; B],
 }
 
+/// Public interface
+impl Node {
+
+}
+
 /// Private interface
 impl Node {
     /// Perform initial setup, such as fixing the keys/children arrays,
@@ -49,8 +59,11 @@ impl Node {
         if self.num_keys == 0 {
             return (false, 0)
         } else {
-            let last_key = &self.keys[self.num_keys-1].clone_to_arc_byte_slice(pool).unwrap();
-            if key.cmp(last_key) == cmp::Ordering::Greater {
+            let last_key = recover_but_panic_in_debug!(
+                self.keys[self.num_keys-1].clone_to_arc_byte_slice(pool),
+                (false, BUFFER_END)
+            );
+            if key.cmp(&*last_key) == cmp::Ordering::Greater {
                 return (false, self.num_keys)
             }
         }
@@ -59,8 +72,11 @@ impl Node {
         let mut i = top/2;
         let mut old_i = i;
         loop {
-            let i_key = &self.keys[i].clone_to_arc_byte_slice(pool).unwrap();
-            match key.cmp(i_key) {
+            let i_key = recover_but_panic_in_debug!(
+                self.keys[i].clone_to_arc_byte_slice(pool),
+                (false, BUFFER_END)
+            );
+            match key.cmp(&*i_key) {
                 cmp::Ordering::Equal => break,
                 cmp::Ordering::Less => top = if i > 1 {i-1} else {0},
                 cmp::Ordering::Greater => bottom = i+1,
@@ -75,8 +91,11 @@ impl Node {
                 old_i = i;
             }
         }
-        let i_key = &self.keys[i].clone_to_arc_byte_slice(pool).unwrap();
-        if key.cmp(i_key) == cmp::Ordering::Equal {
+        let i_key = recover_but_panic_in_debug!(
+            self.keys[i].clone_to_arc_byte_slice(pool),
+            (false, BUFFER_END)
+        );
+        if key.cmp(&*i_key) == cmp::Ordering::Equal {
             (true, i)
         } else {
             (false, i)
@@ -97,10 +116,11 @@ impl Node {
         assert_eq!(NodeType::Leaf, self.node_type);
         let key_arc = try!(pool.malloc(key));
         let val_arc = try!(pool.malloc(value));
-
         let node_arc = try!(pool.clone(self));
+
         { // Borrow checker
             let node = node_arc.deref_as_mut::<Node>();
+            node.tx_id = tx_id;
             let (found, index) = node.index_or_insertion_of(key, pool);
             if found {
                 return Err("Key already exists");
@@ -158,7 +178,85 @@ fn insert_into(array: &mut [PersistedArcByteSlice; B],
     // Shift everything after the index where we're inserting down
     for i in (index+1..array_size).rev() {
         array[i] = array[i-1].clone(pool).unwrap();
-        array[i-1].release(pool);
+        debug_assert!(array[i-1].release(pool).is_ok());
     }
     array[index] = arc.clone_to_persisted();
+}
+
+pub struct DebuggableNode<'a> {
+    node: &'a Node,
+    pool: &'a Pool,
+}
+
+impl <'a> fmt::Debug for DebuggableNode<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let key_vec: Vec<String> = self.node.keys.iter()
+            .take(self.node.num_keys)
+            .map(|persist| {
+                str::from_utf8(
+                    &*persist.clone_to_arc_byte_slice(self.pool).unwrap()
+                )
+                .unwrap()
+                .to_string()
+            })
+            .collect();
+        let child_vec: Vec<String> = self.node.children.iter()
+            .take(self.node.num_children)
+            .map(|persist| {
+                str::from_utf8(
+                    &*persist.clone_to_arc_byte_slice(self.pool).unwrap()
+                )
+                .unwrap()
+                .to_string()
+            })
+            .collect();
+        fmt.debug_struct(&format!("{:?}", self.node.node_type))
+            .field("tx_id", &self.node.tx_id)
+            .field("keys", &key_vec)
+            .field("children", &child_vec)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use allocator::*;
+    use super::*;
+    use super::NodeType::*;
+
+    #[test]
+    fn test_insert_remove() {
+        let mut buf: [u8; 0x5000] = [0; 0x5000];
+        let key: Vec<u8> = "hello".bytes().collect();
+        let val: Vec<u8> = "world".bytes().collect();
+        let p = Pool::new(&mut buf[..]);
+        let n_arc = p.make_new::<Node>().unwrap();
+        let n = n_arc.deref_as_mut::<Node>();
+        n.init(0, Leaf);
+
+        assert_eq!(
+            "Leaf { tx_id: 0, keys: [], children: [] }",
+            format!("{:?}", DebuggableNode {
+                node: n,
+                pool: &p,
+            })
+        );
+        let n2_arc = n.leaf_node_insert_non_full(1, &key[..], &val[..], &p).unwrap();
+        assert_eq!(
+            "Leaf { tx_id: 1, keys: [\"hello\"], children: [\"world\"] }",
+            format!("{:?}", DebuggableNode {
+                node: n2_arc.deref_as::<Node>(),
+                pool: &p,
+            })
+        );
+
+        let n3_arc = n2_arc.deref_as::<Node>().leaf_node_remove(1, &key[..], &p).unwrap();
+        assert_eq!(
+            "Leaf { tx_id: 1, keys: [], children: [] }",
+            format!("{:?}", DebuggableNode {
+                node: n3_arc.deref_as::<Node>(),
+                pool: &p,
+            })
+        );
+    }
 }

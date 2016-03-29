@@ -121,6 +121,7 @@ impl  Drop for ArcByteSlice {
 /// However, you must always manually release the PersistedArcByteSlice
 /// since releasing requires reference to a pool. The Drop impl will panic
 /// if you forget to release the persist.
+#[derive(Debug)]
 pub struct PersistedArcByteSlice {
     pub arc_inner_index: usize,
     id_tag: usize,
@@ -150,10 +151,12 @@ impl PersistedArcByteSlice {
     }
 }
 
-impl Drop for PersistedArcByteSlice {
-    fn drop(&mut self) {
-        if self.id_tag != 0 {
-            panic!("You MUST call release on a PersistedArcByteSlice before it can be dropped cleanly")
-        }
-    }
-}
+// TODO: Adding the drop flag causes a segfault when assigning to the array
+// of children. Figure this out so I can re-enable this check
+// impl Drop for PersistedArcByteSlice {
+//     fn drop(&mut self) {
+//         if self.id_tag != 0 {
+//             panic!("You MUST call release on a PersistedArcByteSlice before it can be dropped cleanly")
+//         }
+//     }
+// }
