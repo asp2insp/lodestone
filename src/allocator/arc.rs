@@ -145,9 +145,10 @@ impl PersistedArcByteSlice {
     }
 
     pub fn release(&mut self, pool: &Pool) -> Result<(), &'static str> {
+        try!(pool.release(self));
         self.id_tag = 0;
         self.arc_inner_index = BUFFER_END;
-        pool.release(self)
+        Ok(())
     }
 }
 

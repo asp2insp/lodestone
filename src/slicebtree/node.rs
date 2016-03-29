@@ -6,7 +6,7 @@ use super::*;
 macro_rules! recover_but_panic_in_debug {
     ($expr:expr, $default:expr) => ({
         let t = $expr;
-        debug_assert!(t.is_ok());
+        debug_assert!(t.is_ok(), format!("Err in debug: {:?}", t.err()));
         match t {
             Ok(val) => val,
             Err(_) => {
@@ -55,7 +55,7 @@ impl Node {
     /// The first return value is true if the given key exists in the node.
     /// The second parameter is the location of the key if it exists, or the
     /// point where the key should be inserted if it does not already exist.
-    fn index_or_insertion_of(&self, key: &[u8], pool: &Pool) -> (bool, usize) {
+    pub fn index_or_insertion_of(&self, key: &[u8], pool: &Pool) -> (bool, usize) {
         if self.num_keys == 0 {
             return (false, 0)
         } else {
@@ -178,7 +178,8 @@ fn insert_into(array: &mut [PersistedArcByteSlice; B],
     // Shift everything after the index where we're inserting down
     for i in (index+1..array_size).rev() {
         array[i] = array[i-1].clone(pool).unwrap();
-        debug_assert!(array[i-1].release(pool).is_ok());
+        let cleanup = array[i-1].release(pool);
+        debug_assert!(cleanup.is_ok(), format!("{:?}", cleanup.err()));
     }
     array[index] = arc.clone_to_persisted();
 }
@@ -212,8 +213,8 @@ impl <'a> fmt::Debug for DebuggableNode<'a> {
             .collect();
         fmt.debug_struct(&format!("{:?}", self.node.node_type))
             .field("tx_id", &self.node.tx_id)
-            .field("keys", &key_vec)
-            .field("children", &child_vec)
+            .field("keys", &key_vec.join(", "))
+            .field("children", &child_vec.join(", "))
             .finish()
     }
 }
@@ -235,7 +236,7 @@ mod tests {
         n.init(0, Leaf);
 
         assert_eq!(
-            "Leaf { tx_id: 0, keys: [], children: [] }",
+            "Leaf { tx_id: 0, keys: \"\", children: \"\" }",
             format!("{:?}", DebuggableNode {
                 node: n,
                 pool: &p,
@@ -243,19 +244,61 @@ mod tests {
         );
         let n2_arc = n.leaf_node_insert_non_full(1, &key[..], &val[..], &p).unwrap();
         assert_eq!(
-            "Leaf { tx_id: 1, keys: [\"hello\"], children: [\"world\"] }",
+            "Leaf { tx_id: 1, keys: \"hello\", children: \"world\" }",
             format!("{:?}", DebuggableNode {
                 node: n2_arc.deref_as::<Node>(),
                 pool: &p,
             })
         );
 
-        let n3_arc = n2_arc.deref_as::<Node>().leaf_node_remove(1, &key[..], &p).unwrap();
+        let n3_arc = n2_arc.deref_as::<Node>().leaf_node_remove(2, &key[..], &p).unwrap();
         assert_eq!(
-            "Leaf { tx_id: 1, keys: [], children: [] }",
+            "Leaf { tx_id: 2, keys: \"\", children: \"\" }",
             format!("{:?}", DebuggableNode {
                 node: n3_arc.deref_as::<Node>(),
                 pool: &p,
+            })
+        );
+    }
+
+    #[test]
+    fn test_insertion_ordering() {
+        let mut buf = [0u8; 0x7000];
+        let pool = Pool::new(&mut buf);
+
+        let apple = String::from("apple").into_bytes();
+        let banana = String::from("banana").into_bytes();
+        let cherry = String::from("cherry").into_bytes();
+        let blueberry = String::from("blueberry").into_bytes();
+
+        let n_arc = pool.make_new::<Node>().unwrap();
+        let n = n_arc.deref_as_mut::<Node>();
+        n.init(0, Leaf);
+
+        let n = n.leaf_node_insert_non_full(1, &banana[..], &banana[..], &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &apple[..], &apple[..], &pool).unwrap();
+        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&banana[..], &pool));
+        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&apple[..], &pool));
+
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &cherry[..], &cherry[..], &pool).unwrap();
+        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&banana[..], &pool));
+        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&apple[..], &pool));
+        assert_eq!((true, 2), n.deref_as::<Node>().index_or_insertion_of(&cherry[..], &pool));
+
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(4, &blueberry[..], &blueberry[..], &pool).unwrap();
+        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&banana[..], &pool));
+        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&apple[..], &pool));
+        assert_eq!((true, 3), n.deref_as::<Node>().index_or_insertion_of(&cherry[..], &pool));
+        assert_eq!((true, 2), n.deref_as::<Node>().index_or_insertion_of(&blueberry[..], &pool));
+
+        assert_eq!(
+            "Leaf { tx_id: 4, \
+                keys: \"apple, banana, blueberry, cherry\", \
+                children: \"apple, banana, blueberry, cherry\" \
+            }",
+            format!("{:?}", DebuggableNode {
+                node: n.deref_as::<Node>(),
+                pool: &pool,
             })
         );
     }

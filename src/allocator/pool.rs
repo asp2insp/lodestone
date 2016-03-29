@@ -332,7 +332,7 @@ impl Pool {
     fn index_to_skip_list_header<'a>(&'a self, index: IndexType) -> (usize, &'a mut SkipListEntry) {
         let offset = match index {
             ArcByteSliceStart(i) => i - *HEADER_SIZE,
-            DataStart(i) => i - *ARC_INNER_SIZE - *HEADER_SIZE,
+            DataStart(i) => i - *OVERHEAD,
             SkipListStart(i) => i,
         };
         unsafe {
