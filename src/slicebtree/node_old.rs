@@ -167,44 +167,6 @@ impl <'a>Iterator for KvIter<'a> {
 
 
 
-
-impl Drop for NodeHeader {
-    fn drop(&mut self) {
-
-    }
-}
-
-/// Decrement the ref count for the given node
-fn release_node(entry: &EntryLocation, pool: &Pool) {
-    let is_dead = pool.release(entry.page_index);
-    // If this node is now dead, we can recursively
-    // remove its contents
-    if is_dead {
-        release_node_contents(entry, pool);
-    }
-}
-
-/// Release the memory "owned" by the given node
-fn release_node_contents(entry: &EntryLocation, pool: &Pool) {
-    let node = NodeHeader::from_entry(entry, pool);
-    match node.node_type {
-        NodeType::Root | NodeType::Internal => {
-            for e in node.children.iter().take(node.num_children) {
-                release_node(e, pool);
-            }
-        },
-        NodeType::Leaf => {
-            for e in node.children.iter().take(node.num_children) {
-                release_byte_string(e, pool);
-            }
-        },
-        _ => {},
-    }
-    for e in node.keys.iter().take(node.num_keys) {
-        release_byte_string(e, pool);
-    }
-}
-
 #[test]
 fn test_leaf_node_split() {
     let mut buf = [0u8; 0x8000];
@@ -271,48 +233,7 @@ fn test_leaf_node_remove() {
     assert!(!n5.leaf_node_contains_key(&hello[..], &pool));
 }
 
-#[test]
-fn test_release_leaf_node() {
-    let mut buf = [0u8; 0x5000];
-    let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(NodeType::Leaf, 0, &pool).unwrap();
-    let page_index_1 = n.loc().page_index;
 
-    let hello = String::from("hello").into_bytes();
-    let world = String::from("world").into_bytes();
-    let foo = String::from("foo").into_bytes();
-    let bar = String::from("bar").into_bytes();
-
-    let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-    let page_index_2 = n2.loc().page_index;
-
-    let n3 = n2.leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
-    let page_index_3 = n3.loc().page_index;
-
-    let keys_page = n3.keys[0].page_index;
-    let children_page = n3.children[0].page_index;
-
-    // Each node should be the only user of its page
-    assert_eq!(1, pool.get_ref_count(page_index_1));
-    assert_eq!(1, pool.get_ref_count(page_index_2));
-    assert_eq!(1, pool.get_ref_count(page_index_3));
-
-    // The keys and refs should each have 3 entries across 2 nodes pointed at them
-    assert_eq!(3, pool.get_ref_count(keys_page));
-    assert_eq!(3, pool.get_ref_count(children_page));
-
-    // Now, we'll free the last node, and watch the ref counts go down
-    release_node(&n3.loc(), &pool);
-    assert_eq!(1, pool.get_ref_count(keys_page));
-    assert_eq!(1, pool.get_ref_count(children_page));
-    assert_eq!(0, pool.get_ref_count(page_index_3));
-
-    // Then the other node
-    release_node(&n2.loc(), &pool);
-    assert_eq!(0, pool.get_ref_count(keys_page));
-    assert_eq!(0, pool.get_ref_count(children_page));
-    assert_eq!(0, pool.get_ref_count(page_index_2));
-}
 
 #[test]
 fn test_insert_internal_non_full() {
@@ -337,42 +258,4 @@ fn test_insert_internal_non_full() {
 
     assert!(n2.leaf_node_contains_key(&key[..], &pool));
     assert!(!n.leaf_node_contains_key(&key[..], &pool));
-}
-
-#[test]
-fn test_insertion_ordering() {
-    let mut buf = [0u8; 0x7000];
-    let pool = Pool::new(&mut buf);
-    let n = NodeHeader::alloc_node(NodeType::Leaf, 0, &pool).unwrap();
-
-    let apple = String::from("apple").into_bytes();
-    let banana = String::from("banana").into_bytes();
-    let cherry = String::from("cherry").into_bytes();
-    let blueberry = String::from("blueberry").into_bytes();
-
-    let n = n.leaf_node_insert_non_full(1, &banana[..], &banana[..], &pool).unwrap();
-    let n = n.leaf_node_insert_non_full(1, &apple[..], &apple[..], &pool).unwrap();
-    assert_eq!(1, n.index_of(&banana[..], &pool));
-    assert_eq!(0, n.index_of(&apple[..], &pool));
-
-    let n = n.leaf_node_insert_non_full(1, &cherry[..], &cherry[..], &pool).unwrap();
-    assert_eq!(1, n.index_of(&banana[..], &pool));
-    assert_eq!(0, n.index_of(&apple[..], &pool));
-    assert_eq!(2, n.index_of(&cherry[..], &pool));
-
-    let n = n.leaf_node_insert_non_full(1, &blueberry[..], &blueberry[..], &pool).unwrap();
-    assert_eq!(1, n.index_of(&banana[..], &pool));
-    assert_eq!(0, n.index_of(&apple[..], &pool));
-    assert_eq!(3, n.index_of(&cherry[..], &pool));
-    assert_eq!(2, n.index_of(&blueberry[..], &pool));
-
-    assert_eq!("apple:apple, banana:banana, blueberry:blueberry, cherry:cherry, ",
-        n.to_string(&pool));
-}
-
-#[test]
-fn test_invariants() {
-    use std::mem;
-    println!("CHECK {:?} < {:?}?", mem::size_of::<NodeHeader>(), PAGE_SIZE);
-    assert!(mem::size_of::<NodeHeader>() < PAGE_SIZE);
 }

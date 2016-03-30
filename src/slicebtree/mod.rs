@@ -2,7 +2,6 @@
 /// Supports MVCC up to 2 revisions
 /// Lives entirely within the slice that is given to it.
 /// Keys and Values are byte slices.
-use std::mem;
 use self::node::*;
 use std::sync::atomic::AtomicUsize;
 use allocator::*;

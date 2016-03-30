@@ -1,6 +1,6 @@
 use std::mem;
 use std::sync::atomic::{AtomicUsize};
-use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
+use std::sync::atomic::Ordering::{Acquire, Release, SeqCst, Relaxed};
 use std::ops::Deref;
 
 use super::pool::*;
@@ -31,6 +31,10 @@ impl ArcByteSlice {
             _ptr: inner as *mut ArcByteSliceInner,
             _pool: pool as *const Pool,
         }
+    }
+
+    pub fn get_ref_count(&self) -> usize {
+        self.inner().strong.load(Relaxed)
     }
 
     pub fn clone_to_persisted(&self) -> PersistedArcByteSlice {
@@ -137,18 +141,26 @@ impl PersistedArcByteSlice {
     }
 
     pub fn clone(&self, pool: &Pool) -> Result<PersistedArcByteSlice, &'static str> {
-        try!(pool.retain(self));
+        try!(self.retain(pool));
         Ok(PersistedArcByteSlice {
             arc_inner_index: self.arc_inner_index,
             id_tag: self.id_tag,
         })
     }
 
-    pub fn release(&mut self, pool: &Pool) -> Result<(), &'static str> {
-        try!(pool.release(self));
+    pub fn retain(&self, pool: &Pool) -> Result<(), &'static str> {
+        let arc = try!(pool.clone_persisted_to_arc(self));
+        arc.inner().strong.fetch_add(1, Acquire);
+        Ok(())
+    }
+
+    pub fn release(&mut self, pool: &Pool) -> Result<bool, &'static str> {
+        let arc = try!(pool.clone_persisted_to_arc(self));
+        let remaining_count = arc.inner().strong.fetch_sub(1, Release) - 1;
         self.id_tag = 0;
         self.arc_inner_index = BUFFER_END;
-        Ok(())
+        // The last ref is the arc which will call free if necessary
+        Ok(remaining_count == 1)
     }
 }
 

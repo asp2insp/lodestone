@@ -1,4 +1,4 @@
-use std::{cmp,iter,fmt,str};
+use std::{cmp,fmt,str};
 use allocator::*;
 
 use super::*;
@@ -38,7 +38,21 @@ pub struct Node {
 
 /// Public interface
 impl Node {
-
+    pub fn clone(&self, pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+        let clone = try!(pool.clone(self));
+        {
+            let node = clone.deref_as_mut::<Node>();
+            for i in 0..node.num_keys {
+                let ok = node.keys[i].retain(pool).is_ok();
+                debug_assert!(ok);
+            }
+            for i in 0..node.num_children {
+                let ok = node.children[i].retain(pool).is_ok();
+                debug_assert!(ok);
+            }
+        }
+        Ok(clone)
+    }
 }
 
 /// Private interface
@@ -116,7 +130,7 @@ impl Node {
         assert_eq!(NodeType::Leaf, self.node_type);
         let key_arc = try!(pool.malloc(key));
         let val_arc = try!(pool.malloc(value));
-        let node_arc = try!(pool.clone(self));
+        let node_arc = try!(self.clone(pool));
 
         { // Borrow checker
             let node = node_arc.deref_as_mut::<Node>();
@@ -184,6 +198,34 @@ fn insert_into(array: &mut [PersistedArcByteSlice; B],
     array[index] = arc.clone_to_persisted();
 }
 
+pub fn release_node(persist: &mut PersistedArcByteSlice, pool: &Pool) {
+    { // Borrow checker
+        let arc = recover_but_panic_in_debug!(persist.clone_to_arc_byte_slice(pool), ());
+        let node = arc.deref_as_mut::<Node>();
+        match node.node_type {
+            NodeType::Root | NodeType::Internal => {
+                for p in node.children.iter_mut().take(node.num_children) {
+                    release_node(p, pool);
+                }
+            },
+            NodeType::Leaf => {
+                for p in node.children.iter_mut().take(node.num_children) {
+                    let ok = p.release(pool).is_ok();
+                    debug_assert!(ok);
+                }
+            },
+        }
+        // Release the keys mem
+        for p in node.keys.iter_mut().take(node.num_keys) {
+            let ok = p.release(pool).is_ok();
+            debug_assert!(ok);
+        }
+    }
+    // Finally, release the pointer itself
+    let ok = persist.release(pool).is_ok();
+    debug_assert!(ok);
+}
+
 pub struct DebuggableNode<'a> {
     node: &'a Node,
     pool: &'a Pool,
@@ -224,6 +266,67 @@ mod tests {
     use allocator::*;
     use super::*;
     use super::NodeType::*;
+
+    fn get_ref_count(persist: &PersistedArcByteSlice, pool: &Pool) -> usize {
+        persist.clone_to_arc_byte_slice(pool).unwrap().get_ref_count() - 1
+    }
+
+    #[test]
+    fn test_release_leaf_node() {
+        let mut buf = [0u8; 0x5000];
+        let pool = Pool::new(&mut buf);
+
+        let n_arc = pool.make_new::<Node>().unwrap();
+        let n = n_arc.deref_as_mut::<Node>();
+        n.init(0, Leaf);
+
+        let hello = String::from("hello").into_bytes();
+        let world = String::from("world").into_bytes();
+        let foo = String::from("foo").into_bytes();
+        let bar = String::from("bar").into_bytes();
+
+        let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+        {
+            let n3 = n2.deref_as::<Node>().leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
+
+            // Each node should provide 1 ref for its memory
+            assert_eq!(1, n_arc.get_ref_count());
+            assert_eq!(1, n2.get_ref_count());
+            assert_eq!(1, n3.get_ref_count());
+
+            // 'hello' should have 2 node refs and 'foo' should have 1 ref
+            assert_eq!((true, 1), n3.deref_as::<Node>().index_or_insertion_of(&hello[..], &pool));
+            assert_eq!(2, get_ref_count(&n2.deref_as::<Node>().keys[0], &pool));
+            assert_eq!(2, get_ref_count(&n3.deref_as::<Node>().keys[1], &pool));
+            assert_eq!(1, get_ref_count(&n3.deref_as::<Node>().keys[0], &pool));
+
+            // 'world' should have 2 node refs and 'bar' should have 1 ref
+            assert_eq!(2, get_ref_count(&n2.deref_as::<Node>().children[0], &pool));
+            assert_eq!(2, get_ref_count(&n3.deref_as::<Node>().children[1], &pool));
+            assert_eq!(1, get_ref_count(&n3.deref_as::<Node>().children[0], &pool));
+
+            // Now, we'll free the last node, and watch the ref counts go down
+            release_node(&mut n3.clone_to_persisted(), &pool);
+            // 'hello' and 'world' should have 1 node ref left
+            assert_eq!(1, get_ref_count(&n2.deref_as::<Node>().keys[0], &pool));
+            assert_eq!(1, get_ref_count(&n2.deref_as::<Node>().children[0], &pool));
+        }
+        // n3 should be totally released now, as should 'foo' and 'bar'
+        // The memory from 'foo' and 'bar' should have been reclaimed and merged
+        assert_eq!(
+            "Pool { buffer_size: 20480, \
+                metadata: Metadata { lowest_known_free_index: 6672, next_id_tag: AtomicUsize(9) }, \
+                blocks: [\
+                    _B { start: 0, capacity: 3232, next: 3280, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 3280, capacity: 8, next: 3336, prev: 0, is_free: false }, \
+                    _B { start: 3336, capacity: 8, next: 3392, prev: 3280, is_free: false }, \
+                    _B { start: 3392, capacity: 3232, next: 6672, prev: 3336, is_free: false }, \
+                    _B { start: 6672, capacity: 9664, next: 16384, prev: 3392, is_free: true }\
+                    ] \
+                }",
+            format!("{:?}", &pool)
+        );
+    }
 
     #[test]
     fn test_insert_remove() {
@@ -301,5 +404,14 @@ mod tests {
                 pool: &pool,
             })
         );
+    }
+
+
+    #[test]
+    fn test_size_constraints() {
+        use std::mem;
+        // For efficiency, we want each node to fit inside a single page
+        println!("CHECK {:?} < {:?}?", mem::size_of::<Node>(), *FIRST_OR_SINGLE_CONTENT_SIZE);
+        assert!(mem::size_of::<Node>() < *FIRST_OR_SINGLE_CONTENT_SIZE);
     }
 }

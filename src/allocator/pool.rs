@@ -1,6 +1,6 @@
 use std::{mem, fmt, slice};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{SeqCst, Acquire, Release};
+use std::sync::atomic::Ordering::SeqCst;
 
 use super::arc::*;
 
@@ -75,34 +75,6 @@ enum IndexType {
 
 /// Public interface
 impl Pool {
-    pub fn retain(&self, persist: &PersistedArcByteSlice) -> Result<(), &'static str> {
-        let index = ArcByteSliceStart(persist.arc_inner_index);
-        let (_, header) = self.index_to_skip_list_header(index);
-        if header.id_tag == persist.get_id_tag() {
-            let inner = self.index_to_arc_inner(index);
-            inner.strong.fetch_add(1, Acquire);
-            Ok(())
-        } else {
-            Err("Can't retain. Persisted reference is no longer valid.")
-        }
-    }
-
-    pub fn release(&self, persist: &PersistedArcByteSlice) -> Result<(), &'static str> {
-        let index = ArcByteSliceStart(persist.arc_inner_index);
-        let (_, header) = self.index_to_skip_list_header(index);
-        if header.id_tag == persist.get_id_tag() {
-            let inner = self.index_to_arc_inner(index);
-            let ref_count = inner.strong.fetch_sub(1, Release);
-            if ref_count == 1 {
-                // Last ref, let's release
-                self.free_inner(index);
-            }
-            Ok(())
-        } else {
-            Err("Can't release. Persisted reference is no longer valid.")
-        }
-    }
-
     pub fn make_new<T>(&self) -> Result<ArcByteSlice, &'static str> {
         let size = mem::size_of::<T>();
         let (_, inner) = try!(self.malloc_inner(size));
@@ -218,6 +190,11 @@ impl Pool {
                 // Merge with the next item, by encompassing it
                 let next_next_idx = next.next;
                 header.next = next_next_idx;
+                // Update the prev of the next_next_idx
+                if next_next_idx != BUFFER_END {
+                    let (_, next_next) = self.index_to_skip_list_header(SkipListStart(next_next_idx));
+                    next_next.prev = this_idx;
+                }
             }
         }
         if prev_idx != BUFFER_END {
@@ -226,6 +203,11 @@ impl Pool {
                 // Merge by swallowing this item with the previous item
                 let next_idx = header.next;
                 prev.next = next_idx;
+                // Update the prev of the following item
+                if next_idx != BUFFER_END {
+                    let (_, next) = self.index_to_skip_list_header(SkipListStart(next_idx));
+                    next.prev = prev_idx;
+                }
             }
         }
     }
@@ -292,7 +274,7 @@ impl Pool {
         Ok(ArcByteSlice::new(inner, self))
     }
 
-    pub fn live_ptr_to_byte_index(&self, ptr: *const u8) -> usize {
+    fn live_ptr_to_byte_index(&self, ptr: *const u8) -> usize {
         let obj_addr = ptr as usize;
         let buf_addr = self.buffer as usize;
         if obj_addr < buf_addr {
@@ -403,7 +385,6 @@ struct _B {
 
 #[cfg(test)]
 mod tests {
-    use std::mem;
     use super::*;
 
     #[test]
