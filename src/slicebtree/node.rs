@@ -16,6 +16,14 @@ macro_rules! recover_but_panic_in_debug {
     })
 }
 
+/// Internal nodes have keys in order. The corresponding
+/// child to a key index is the node that contains values
+/// less than or equal to the key.
+/// The index above is the child with values greater than the given key.
+/// Thus, internal nodes can hold up to B-1 keys and B children.
+/// Leaf nodes have a 1-1 correspndence of key to value, holding
+/// up to B keys and B children.
+
 #[derive(Debug, Clone, PartialEq)]
 enum NodeType {
     Root,
@@ -36,6 +44,12 @@ pub struct Node {
     children: [PersistedArcByteSlice; B],
 }
 
+pub struct Split {
+    bottom_half: ArcByteSlice,
+    top_half: ArcByteSlice,
+    mid_key: ArcByteSlice,
+}
+
 /// Public interface
 impl Node {
     pub fn clone(&self, pool: &Pool) -> Result<ArcByteSlice, &'static str> {
@@ -52,6 +66,63 @@ impl Node {
             }
         }
         Ok(clone)
+    }
+
+    /// Splits the node in half, immutably, returning a tuple of the
+    /// (
+    ///    new_bottom_half,
+    ///    new_top_half,
+    ///    mid_key,
+    /// )
+    /// For an internal node, they layout is as follows:
+    ///   key1 : key2 : key3 : key4
+    ///   /    |      |      |     \
+    /// c1     c2     c3     c4    c5
+    /// So here, I want to split into
+    /// key1 : key2       key3 : key4
+    ///  /   |            /    |    \
+    /// c1   c2           c3   c4   c5
+    /// So mid_key = 2 = num_keys/2 so we get [0, 1] and [2, 3]
+    /// mid_child = 2 = num_keys/2 so we get [0, 1] and [2, 3, 4]
+    pub fn split<'a>(&'a self, tx_id: usize, pool: &'a Pool)
+        -> Result<Split, &'static str> {
+        assert!(self.num_keys > 0 && self.num_children > 0, "Split called on an empty node");
+
+        let new_bottom_half_arc = try!(pool.make_new::<Node>());
+        let new_top_half_arc = try!(pool.make_new::<Node>());
+        // Find midpoint
+        let midpoint = self.num_keys/2;
+
+        { // Borrow checker
+            let new_bottom_half = new_bottom_half_arc.deref_as_mut::<Node>();
+            let new_top_half = new_top_half_arc.deref_as_mut::<Node>();
+            new_bottom_half.init(tx_id, self.node_type.clone());
+            new_top_half.init(tx_id, self.node_type.clone());
+
+            // Copy over values
+            for i in 0..midpoint {
+                new_bottom_half.keys[i] = try!(self.keys[i].clone(pool));
+            }
+            for i in 0..midpoint {
+                new_bottom_half.children[i] = try!(self.children[i].clone(pool));
+            }
+            for i in midpoint..self.num_keys {
+                new_top_half.keys[i-midpoint] = try!(self.keys[i].clone(pool));
+            }
+            for i in midpoint..self.num_children {
+                new_top_half.children[i-midpoint] = try!(self.children[i].clone(pool));
+            }
+            // Copy over metadata
+            new_bottom_half.num_keys = midpoint;
+            new_bottom_half.num_children = midpoint;
+            new_top_half.num_keys = self.num_keys - midpoint;
+            new_top_half.num_children = self.num_children - midpoint;
+        }
+        Ok(Split {
+            bottom_half: new_bottom_half_arc,
+            top_half: new_top_half_arc,
+            mid_key: try!(self.keys[midpoint].clone_to_arc_byte_slice(pool))
+        })
     }
 }
 
@@ -272,6 +343,56 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf_node_split() {
+        let mut buf = [0u8; 0x8000];
+        let pool = Pool::new(&mut buf);
+
+        let n_arc = pool.make_new::<Node>().unwrap();
+        let n = n_arc.deref_as_mut::<Node>();
+        n.init(0, Leaf);
+
+        let hello = String::from("hello").into_bytes();
+        let world = String::from("world").into_bytes();
+        let foo = String::from("foo").into_bytes();
+        let bar = String::from("bar").into_bytes();
+        let rust = String::from("rust").into_bytes();
+        let iscool = String::from("is cool").into_bytes();
+
+        let n = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &rust[..], &iscool[..], &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &foo[..], &bar[..], &pool).unwrap();
+
+        assert_eq!(
+            "Leaf { tx_id: 3, \
+                keys: \"foo, hello, rust\", \
+                children: \"bar, world, is cool\" }",
+            format!("{:?}", DebuggableNode {
+                node: n.deref_as::<Node>(),
+                pool: &pool,
+            })
+        );
+
+        let split = n.deref_as::<Node>().split(4, &pool).unwrap();
+
+        let bottom = split.bottom_half.deref_as::<Node>();
+        let top = split.top_half.deref_as::<Node>();
+        assert_eq!(1, bottom.num_keys);
+        assert_eq!(1, bottom.num_children);
+        assert_eq!(2, top.num_keys);
+        assert_eq!(2, top.num_children);
+
+        assert_eq!(hello, &*split.mid_key);
+
+        assert!(top.leaf_node_contains_key(&hello[..], &pool));
+        assert!(bottom.leaf_node_contains_key(&foo[..], &pool));
+
+        assert!(!bottom.leaf_node_contains_key(&hello[..], &pool));
+        assert!(!top.leaf_node_contains_key(&foo[..], &pool));
+
+        assert!(top.leaf_node_contains_key(&rust[..], &pool));
+    }
+
+    #[test]
     fn test_release_leaf_node() {
         let mut buf = [0u8; 0x5000];
         let pool = Pool::new(&mut buf);
@@ -332,7 +453,9 @@ mod tests {
     fn test_insert_remove() {
         let mut buf: [u8; 0x5000] = [0; 0x5000];
         let key: Vec<u8> = "hello".bytes().collect();
+        let key2: Vec<u8> = "monkey".bytes().collect();
         let val: Vec<u8> = "world".bytes().collect();
+        let val2: Vec<u8> = "see/do".bytes().collect();
         let p = Pool::new(&mut buf[..]);
         let n_arc = p.make_new::<Node>().unwrap();
         let n = n_arc.deref_as_mut::<Node>();
@@ -354,11 +477,20 @@ mod tests {
             })
         );
 
-        let n3_arc = n2_arc.deref_as::<Node>().leaf_node_remove(2, &key[..], &p).unwrap();
+        let n3_arc = n2_arc.deref_as::<Node>().leaf_node_insert_non_full(2, &key2[..], &val2[..], &p).unwrap();
         assert_eq!(
-            "Leaf { tx_id: 2, keys: \"\", children: \"\" }",
+            "Leaf { tx_id: 2, keys: \"hello, monkey\", children: \"world, see/do\" }",
             format!("{:?}", DebuggableNode {
                 node: n3_arc.deref_as::<Node>(),
+                pool: &p,
+            })
+        );
+
+        let n4_arc = n3_arc.deref_as::<Node>().leaf_node_remove(3, &key[..], &p).unwrap();
+        assert_eq!(
+            "Leaf { tx_id: 3, keys: \"monkey\", children: \"see/do\" }",
+            format!("{:?}", DebuggableNode {
+                node: n4_arc.deref_as::<Node>(),
                 pool: &p,
             })
         );
