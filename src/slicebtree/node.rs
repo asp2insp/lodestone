@@ -191,9 +191,25 @@ impl Node {
 /// Leaf Node impl
 impl Node {
     /// Check to see if the node contains the given key
-    fn leaf_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
+    pub fn leaf_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
         assert_eq!(NodeType::Leaf, self.node_type);
         self.index_or_insertion_of(key, pool).0
+    }
+
+    /// Return an arc to the value associated with the given key
+    /// or None if the key is not contained within this node
+    pub fn value_for_key(&self, key: &[u8], pool: &Pool) -> Option<ArcByteSlice> {
+        let (found, idx) = self.index_or_insertion_of(key, pool);
+        if found {
+            Some(
+                recover_but_panic_in_debug!(
+                    self.children[idx].clone_to_arc_byte_slice(pool),
+                    None
+                )
+            )
+        } else {
+            None
+        }
     }
 
     /// Insert in an append only/immutable fashion
@@ -390,6 +406,10 @@ mod tests {
         assert!(!top.leaf_node_contains_key(&foo[..], &pool));
 
         assert!(top.leaf_node_contains_key(&rust[..], &pool));
+
+        assert_eq!(&iscool[..], &*top.value_for_key(&rust[..], &pool).unwrap());
+        assert_eq!(&world[..], &*top.value_for_key(&hello[..], &pool).unwrap());
+        assert_eq!(&bar[..], &*bottom.value_for_key(&foo[..], &pool).unwrap());
     }
 
     #[test]
