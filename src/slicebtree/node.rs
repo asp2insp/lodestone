@@ -388,6 +388,17 @@ mod tests {
     use super::*;
     use super::NodeType::*;
 
+    lazy_static! {
+        static ref HELLO: Vec<u8> = String::from("hello").into_bytes();
+        static ref WORLD: Vec<u8> = String::from("world").into_bytes();
+        static ref FOO: Vec<u8> = String::from("foo").into_bytes();
+        static ref BAR: Vec<u8> = String::from("bar").into_bytes();
+        static ref APPLE: Vec<u8> = String::from("apple").into_bytes();
+        static ref BANANA: Vec<u8> = String::from("banana").into_bytes();
+        static ref CHERRY: Vec<u8> = String::from("cherry").into_bytes();
+        static ref BLUEBERRY: Vec<u8> = String::from("blueberry").into_bytes();
+    }
+
     fn get_ref_count(persist: &PersistedArcByteSlice, pool: &Pool) -> usize {
         persist.clone_to_arc_byte_slice(pool).unwrap().get_ref_count() - 1
     }
@@ -401,17 +412,9 @@ mod tests {
         let n = n_arc.deref_as_mut::<Node>();
         n.init(0, Leaf);
 
-        let hello = String::from("hello").into_bytes();
-        let world = String::from("world").into_bytes();
-        let foo = String::from("foo").into_bytes();
-        let bar = String::from("bar").into_bytes();
-        let rust = String::from("rust").into_bytes();
-        let iscool = String::from("is cool").into_bytes();
-
-        let n = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &rust[..], &iscool[..], &pool).unwrap();
-        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &foo[..], &bar[..], &pool).unwrap();
-
+        let n = n.leaf_node_insert_non_full(1, &HELLO, &WORLD, &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &CHERRY, &BLUEBERRY, &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &FOO, &BAR, &pool).unwrap();
 
         let split = n.deref_as::<Node>().split(4, &pool).unwrap();
 
@@ -425,8 +428,8 @@ mod tests {
 
         assert_eq!(
             "Leaf { tx_id: 5, \
-                keys: \"foo, hello, rust\", \
-                children: \"bar, world, is cool\" }",
+                keys: \"cherry, foo, hello\", \
+                children: \"blueberry, bar, world\" }",
             format!("{:?}", DebuggableNode {
                 node: join.deref_as::<Node>(),
                 pool: &pool,
@@ -443,21 +446,14 @@ mod tests {
         let n = n_arc.deref_as_mut::<Node>();
         n.init(0, Leaf);
 
-        let hello = String::from("hello").into_bytes();
-        let world = String::from("world").into_bytes();
-        let foo = String::from("foo").into_bytes();
-        let bar = String::from("bar").into_bytes();
-        let rust = String::from("rust").into_bytes();
-        let iscool = String::from("is cool").into_bytes();
-
-        let n = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
-        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &rust[..], &iscool[..], &pool).unwrap();
-        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &foo[..], &bar[..], &pool).unwrap();
+        let n = n.leaf_node_insert_non_full(1, &HELLO, &WORLD, &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &CHERRY, &BLUEBERRY, &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &FOO, &BAR, &pool).unwrap();
 
         assert_eq!(
             "Leaf { tx_id: 3, \
-                keys: \"foo, hello, rust\", \
-                children: \"bar, world, is cool\" }",
+                keys: \"cherry, foo, hello\", \
+                children: \"blueberry, bar, world\" }",
             format!("{:?}", DebuggableNode {
                 node: n.deref_as::<Node>(),
                 pool: &pool,
@@ -473,19 +469,19 @@ mod tests {
         assert_eq!(2, top.num_keys);
         assert_eq!(2, top.num_children);
 
-        assert_eq!(hello, &*split.mid_key);
+        assert_eq!(*FOO, &*split.mid_key);
 
-        assert!(top.leaf_node_contains_key(&hello[..], &pool));
-        assert!(bottom.leaf_node_contains_key(&foo[..], &pool));
+        assert!(top.leaf_node_contains_key(&HELLO, &pool));
+        assert!(bottom.leaf_node_contains_key(&CHERRY, &pool));
 
-        assert!(!bottom.leaf_node_contains_key(&hello[..], &pool));
-        assert!(!top.leaf_node_contains_key(&foo[..], &pool));
+        assert!(!bottom.leaf_node_contains_key(&HELLO, &pool));
+        assert!(!top.leaf_node_contains_key(&CHERRY, &pool));
 
-        assert!(top.leaf_node_contains_key(&rust[..], &pool));
+        assert!(top.leaf_node_contains_key(&FOO, &pool));
 
-        assert_eq!(&iscool[..], &*top.value_for_key(&rust[..], &pool).unwrap());
-        assert_eq!(&world[..], &*top.value_for_key(&hello[..], &pool).unwrap());
-        assert_eq!(&bar[..], &*bottom.value_for_key(&foo[..], &pool).unwrap());
+        assert_eq!(*BAR, &*top.value_for_key(&FOO, &pool).unwrap());
+        assert_eq!(*WORLD, &*top.value_for_key(&HELLO, &pool).unwrap());
+        assert_eq!(*BLUEBERRY, &*bottom.value_for_key(&CHERRY, &pool).unwrap());
     }
 
     #[test]
@@ -497,14 +493,9 @@ mod tests {
         let n = n_arc.deref_as_mut::<Node>();
         n.init(0, Leaf);
 
-        let hello = String::from("hello").into_bytes();
-        let world = String::from("world").into_bytes();
-        let foo = String::from("foo").into_bytes();
-        let bar = String::from("bar").into_bytes();
-
-        let n2 = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+        let n2 = n.leaf_node_insert_non_full(1, &HELLO, &WORLD, &pool).unwrap();
         {
-            let n3 = n2.deref_as::<Node>().leaf_node_insert_non_full(2, &foo[..], &bar[..], &pool).unwrap();
+            let n3 = n2.deref_as::<Node>().leaf_node_insert_non_full(2, &FOO, &BAR, &pool).unwrap();
 
             // Each node should provide 1 ref for its memory
             assert_eq!(1, n_arc.get_ref_count());
@@ -512,7 +503,7 @@ mod tests {
             assert_eq!(1, n3.get_ref_count());
 
             // 'hello' should have 2 node refs and 'foo' should have 1 ref
-            assert_eq!((true, 1), n3.deref_as::<Node>().index_or_insertion_of(&hello[..], &pool));
+            assert_eq!((true, 1), n3.deref_as::<Node>().index_or_insertion_of(&HELLO, &pool));
             assert_eq!(2, get_ref_count(&n2.deref_as::<Node>().keys[0], &pool));
             assert_eq!(2, get_ref_count(&n3.deref_as::<Node>().keys[1], &pool));
             assert_eq!(1, get_ref_count(&n3.deref_as::<Node>().keys[0], &pool));
@@ -548,11 +539,7 @@ mod tests {
     #[test]
     fn test_insert_remove() {
         let mut buf: [u8; 0x5000] = [0; 0x5000];
-        let key: Vec<u8> = "hello".bytes().collect();
-        let key2: Vec<u8> = "monkey".bytes().collect();
-        let val: Vec<u8> = "world".bytes().collect();
-        let val2: Vec<u8> = "see/do".bytes().collect();
-        let p = Pool::new(&mut buf[..]);
+        let p = Pool::new(&mut buf);
         let n_arc = p.make_new::<Node>().unwrap();
         let n = n_arc.deref_as_mut::<Node>();
         n.init(0, Leaf);
@@ -564,7 +551,7 @@ mod tests {
                 pool: &p,
             })
         );
-        let n2_arc = n.leaf_node_insert_non_full(1, &key[..], &val[..], &p).unwrap();
+        let n2_arc = n.leaf_node_insert_non_full(1, &HELLO, &WORLD, &p).unwrap();
         assert_eq!(
             "Leaf { tx_id: 1, keys: \"hello\", children: \"world\" }",
             format!("{:?}", DebuggableNode {
@@ -573,18 +560,18 @@ mod tests {
             })
         );
 
-        let n3_arc = n2_arc.deref_as::<Node>().leaf_node_insert_non_full(2, &key2[..], &val2[..], &p).unwrap();
+        let n3_arc = n2_arc.deref_as::<Node>().leaf_node_insert_non_full(2, &BANANA, &CHERRY, &p).unwrap();
         assert_eq!(
-            "Leaf { tx_id: 2, keys: \"hello, monkey\", children: \"world, see/do\" }",
+            "Leaf { tx_id: 2, keys: \"banana, hello\", children: \"cherry, world\" }",
             format!("{:?}", DebuggableNode {
                 node: n3_arc.deref_as::<Node>(),
                 pool: &p,
             })
         );
 
-        let n4_arc = n3_arc.deref_as::<Node>().leaf_node_remove(3, &key[..], &p).unwrap();
+        let n4_arc = n3_arc.deref_as::<Node>().leaf_node_remove(3, &HELLO, &p).unwrap();
         assert_eq!(
-            "Leaf { tx_id: 3, keys: \"monkey\", children: \"see/do\" }",
+            "Leaf { tx_id: 3, keys: \"banana\", children: \"cherry\" }",
             format!("{:?}", DebuggableNode {
                 node: n4_arc.deref_as::<Node>(),
                 pool: &p,
@@ -597,30 +584,25 @@ mod tests {
         let mut buf = [0u8; 0x7000];
         let pool = Pool::new(&mut buf);
 
-        let apple = String::from("apple").into_bytes();
-        let banana = String::from("banana").into_bytes();
-        let cherry = String::from("cherry").into_bytes();
-        let blueberry = String::from("blueberry").into_bytes();
-
         let n_arc = pool.make_new::<Node>().unwrap();
         let n = n_arc.deref_as_mut::<Node>();
         n.init(0, Leaf);
 
-        let n = n.leaf_node_insert_non_full(1, &banana[..], &banana[..], &pool).unwrap();
-        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &apple[..], &apple[..], &pool).unwrap();
-        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&banana[..], &pool));
-        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&apple[..], &pool));
+        let n = n.leaf_node_insert_non_full(1, &BANANA, &BANANA, &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &APPLE, &APPLE, &pool).unwrap();
+        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&BANANA, &pool));
+        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&APPLE, &pool));
 
-        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &cherry[..], &cherry[..], &pool).unwrap();
-        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&banana[..], &pool));
-        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&apple[..], &pool));
-        assert_eq!((true, 2), n.deref_as::<Node>().index_or_insertion_of(&cherry[..], &pool));
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &CHERRY, &CHERRY, &pool).unwrap();
+        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&BANANA, &pool));
+        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&APPLE, &pool));
+        assert_eq!((true, 2), n.deref_as::<Node>().index_or_insertion_of(&CHERRY, &pool));
 
-        let n = n.deref_as::<Node>().leaf_node_insert_non_full(4, &blueberry[..], &blueberry[..], &pool).unwrap();
-        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&banana[..], &pool));
-        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&apple[..], &pool));
-        assert_eq!((true, 3), n.deref_as::<Node>().index_or_insertion_of(&cherry[..], &pool));
-        assert_eq!((true, 2), n.deref_as::<Node>().index_or_insertion_of(&blueberry[..], &pool));
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(4, &BLUEBERRY, &BLUEBERRY, &pool).unwrap();
+        assert_eq!((true, 1), n.deref_as::<Node>().index_or_insertion_of(&BANANA, &pool));
+        assert_eq!((true, 0), n.deref_as::<Node>().index_or_insertion_of(&APPLE, &pool));
+        assert_eq!((true, 3), n.deref_as::<Node>().index_or_insertion_of(&CHERRY, &pool));
+        assert_eq!((true, 2), n.deref_as::<Node>().index_or_insertion_of(&BLUEBERRY, &pool));
 
         assert_eq!(
             "Leaf { tx_id: 4, \
