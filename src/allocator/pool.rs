@@ -1,305 +1,487 @@
-use std::mem;
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::ops::{Index, IndexMut};
-use std::collections::LinkedList;
-use std::ptr;
+use std::{mem, fmt, slice};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::SeqCst;
 
-use super::page::*;
+use super::arc::*;
 
-/// A pool represents a fixed number of ref-counted objects.
-/// The pool treats all given space as an unallocated
-/// pool of objects. Each object is prefixed with a header.
-/// The header is formatted as follows:
-/// * V1
-///   - [0..2] ref_count: u16
-///
+pub const PAGE_SIZE: usize = 4096;
+pub const BUFFER_END: usize = !0 as usize;
+
+lazy_static! {
+    pub static ref HEADER_SIZE: usize = mem::size_of::<SkipListEntry>();
+    pub static ref FIRST_OR_SINGLE_CONTENT_SIZE: usize = PAGE_SIZE - *HEADER_SIZE;
+    pub static ref OVERHEAD: usize = *HEADER_SIZE + *ARC_INNER_SIZE;
+}
+
 pub struct Pool {
     buffer: *mut u8,
     buffer_size: usize,
-    capacity: usize,
-
-    tail: AtomicUsize, // One past the end index
-
-    // Cached values
-    slot_size: usize,
-    header_size: usize,
-
-    free_list: RefCell<LinkedList<PageIndex>>,
 }
 
-struct SlotHeader {
-    ref_count: AtomicUsize,
+#[derive(Debug)]
+struct Metadata {
+    // TODO rip this out and replace with a free list
+    // We probably want to keep 2 free lists -- A one-page
+    // list and a larger objects list to avoid fragmentation
+    lowest_known_free_index: usize,
+    next_id_tag: AtomicUsize,
+}
+
+impl fmt::Debug for Pool {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Pool")
+            .field("buffer_size", &self.buffer_size)
+            .field("metadata", &self.get_metadata_block())
+            .field("blocks", &self.get_debug_blocks())
+            .finish()
+    }
+}
+
+impl Pool {
+    pub fn new(buf: &mut [u8]) -> Pool {
+        let ptr: *mut u8 = buf.as_mut_ptr();
+        let p = Pool {
+            buffer: ptr,
+            buffer_size: buf.len(),
+        };
+        {
+            let metadata = p.get_metadata_block();
+            metadata.lowest_known_free_index = 0;
+            metadata.next_id_tag = AtomicUsize::new(1);
+        }
+        let last_skip_index = p.buffer_size - PAGE_SIZE;
+        // Init head of skip list
+        p.make_skip_entry(SkipListStart(0), BUFFER_END, last_skip_index, true);
+        // Last page is metadata and not usable as a full page-aligned chunk anyway
+        p.make_skip_entry(SkipListStart(last_skip_index), 0, BUFFER_END, false);
+        p
+    }
+}
+
+#[derive(Debug)]
+struct SkipListEntry {
+    prev: usize, // absolute buffer offset of previous SKE
+    id_tag: usize, // 0 if the given memory is free, unique id otherwise
+    next: usize, // absolute buffer offset of next SKE
+}
+
+use self::IndexType::*;
+#[derive(Debug, Copy, Clone)]
+enum IndexType {
+    ArcByteSliceStart(usize),
+    DataStart(usize),
+    SkipListStart(usize),
 }
 
 /// Public interface
 impl Pool {
-    pub fn new(buf: &mut [u8]) -> Pool {
-        let ptr: *mut u8 = buf.as_mut_ptr();
-        let header_size = mem::size_of::<SlotHeader>();
-        let slot_size = mem::size_of::<Page>() + header_size;
-        Pool {
-            buffer: ptr,
-            buffer_size: buf.len(),
-            tail: AtomicUsize::new(0),
-            slot_size: slot_size,
-            capacity: buf.len() / slot_size,
-            header_size: header_size,
-            free_list: RefCell::new(LinkedList::new()),
-        }
+    pub fn make_new<T>(&self) -> Result<ArcByteSlice, &'static str> {
+        let size = mem::size_of::<T>();
+        let (_, inner) = try!(self.malloc_inner(size));
+        Ok(ArcByteSlice::new(inner, self))
     }
 
-    /// Remove all objects from the pool
-    /// and zero the memory
-    pub unsafe fn clear(&mut self) {
-        let mut i = self.buffer.clone();
-        let end = self.buffer.clone().offset(self.buffer_size as isize);
-        while i != end {
-            *i = 0u8;
-            i = i.offset(1);
-        }
-    }
-
-    /// Get the reference count for a given page
-    /// Don't use this for anything besides testing. Because
-    /// really. What are you thinking?
-    pub fn get_ref_count(&self, index: PageIndex) -> usize {
-        self.header_for(index).ref_count.load(Ordering::SeqCst)
-    }
-
-    /// Fast copy a slot's contents to a new slot and return
-    /// a pointer to the new slot
-    pub fn alloc_with_contents_of(&self, other: PageIndex) -> Result<PageIndex, &'static str> {
-        let index = try!(self.claim_free_index());
+    pub fn clone<T>(&self, from: &T) -> Result<ArcByteSlice, &'static str> {
+        let dest = try!(self.make_new::<T>());
+        let arc_index = self.arc_to_arc_inner_index(&dest);
+        let dest_slice = self.index_to_byte_slice_mut(arc_index);
+        let from_ptr = from as *const T;
         unsafe {
-            let from = self.raw_contents_for(other);
-            let to = self.raw_contents_for(index);
-            ptr::copy_nonoverlapping(from, to, mem::size_of::<Page>());
+            let from_arc = try!(self.live_ptr_to_arc(mem::transmute(from_ptr)));
+            dest_slice.clone_from_slice(&*from_arc);
         }
-        Ok(index)
+        Ok(dest)
     }
 
-    /// Try to allocate a new item from the pool.
-    /// A mutable reference to the item is returned on success
-    pub fn alloc(&self) -> Result<PageIndex, &'static str> {
-        let index = try!(self.claim_free_index());
-        self.zero_page(index);
-        Ok(index)
+    pub fn malloc(&self, data: &[u8]) -> Result<ArcByteSlice, &'static str> {
+        let size = data.len();
+        let (idx, inner) = try!(self.malloc_inner(size));
+        let dest = self.index_to_byte_slice_mut(idx);
+        dest.clone_from_slice(data);
+        Ok(ArcByteSlice::new(inner, self))
     }
 
-    // Increase the ref count for the cell at the given index
-    pub fn retain(&self, index: PageIndex) {
-        let h = self.header_for(index);
-        h.ref_count.fetch_add(1, Ordering::SeqCst);
+    pub fn free(&self, arc: &ArcByteSlice) {
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        self.free_inner(arc_index)
     }
 
-    // Decrease the ref count for the cell at the given index
-    // return true iff the cell is now considered free
-    pub fn release(&self, index: PageIndex) -> bool {
-        let mut is_free = false;
-        { // Make the borrow checker happy
-            let h = self.header_for(index);
-            let old = h.ref_count.fetch_sub(1, Ordering::SeqCst);
-            if old == 1 {
-                // TODO: check the correctness of this
-                is_free = true;
-            }
+    pub fn deref<'a>(&'a self, arc: &'a ArcByteSlice) -> &'a [u8] {
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        self.index_to_byte_slice(arc_index)
+    }
+
+    pub unsafe fn deref_as<'a, T>(&'a self, arc: &'a ArcByteSlice) -> &'a T {
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        let offset = self.index_to_data_offset(arc_index);
+        mem::transmute(self.buffer.offset(offset as isize))
+    }
+
+    pub unsafe fn deref_as_mut<'a, T>(&'a self, arc: &'a ArcByteSlice) -> &'a mut T {
+        let arc_index = self.arc_to_arc_inner_index(arc);
+        let offset = self.index_to_data_offset(arc_index);
+        mem::transmute(self.buffer.offset(offset as isize))
+    }
+
+    pub fn clone_persisted_to_arc(&self, persisted: &PersistedArcByteSlice) -> Result<ArcByteSlice, &'static str> {
+        let index = ArcByteSliceStart(persisted.arc_inner_index);
+        let (_, header) = self.index_to_skip_list_header(index);
+        if header.id_tag == persisted.get_id_tag() {
+            let inner = self.index_to_arc_inner(index);
+            Ok(ArcByteSlice::new(inner, self))
+        } else {
+            Err("Can't convert to Arc. Persisted reference is no longer valid.")
         }
-        if is_free {
-            self.free_list.borrow_mut().push_back(index);
-        }
-        is_free
-    }
-
-    /// Returns the number of live items. O(1) running time.
-    pub fn live_count(&self) -> usize {
-        self.tail.load(Ordering::SeqCst) - self.free_list.borrow().len()
     }
 }
 
-
-/// Internal Functions
+/// Private interface
 impl Pool {
-    // Returns an item from the free list, or
-    // tries to allocate a new one from the buffer
-    fn claim_free_index(&self) -> Result<PageIndex, &'static str> {
-        let index = match self.free_list.borrow_mut().pop_front() {
-            Some(i) => i,
-            None => try!(self.push_back_alloc()),
-        };
-        self.retain(index);
-        Ok(index)
+    fn malloc_inner<'a>(&'a self, size: usize) -> Result<(IndexType, &'a mut ArcByteSliceInner), &'static str> {
+        let chunked_size = byte_align(size) + *OVERHEAD;
+        let metadata = self.get_metadata_block();
+        // Try to claim a block
+        let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
+            SkipListStart(metadata.lowest_known_free_index));
+        if free_block_index == BUFFER_END {
+            return Err("OOM")
+        }
+        // Claim as non-free
+        entry.id_tag = metadata.next_id_tag.fetch_add(1, SeqCst);
+
+        let next_index = free_block_index + chunked_size;
+        let following_index = entry.next;
+        assert!(next_index <= following_index);
+        // If we split a block, then we need to make a new entry
+        if next_index < following_index {
+            self.make_skip_entry(SkipListStart(next_index),
+                free_block_index, following_index, true);
+            let (_, following_entry) = self.index_to_skip_list_header(SkipListStart(following_index));
+            following_entry.prev = next_index;
+            entry.next = next_index;
+        }
+
+        // Update known free index if necessary (only necessary if we've used the lowest)
+        if free_block_index == metadata.lowest_known_free_index {
+            let (idx, _) = self.next_free_block_larger_than(0, SkipListStart(free_block_index));
+            metadata.lowest_known_free_index = idx;
+        }
+
+        let inner = self.index_to_arc_inner(SkipListStart(free_block_index));
+        inner.init(size);
+        Ok((SkipListStart(free_block_index), inner))
     }
 
-    // Pushes the end of the used space in the buffer back
-    // returns the previous index
-    fn push_back_alloc(&self) -> Result<PageIndex, &'static str> {
-        let old_tail = self.tail.fetch_add(1, Ordering::SeqCst);
-        if old_tail >= self.capacity {
-            Err("OOM")
-        } else {
-            Ok(old_tail)
+    fn free_inner(&self, index: IndexType) {
+        let metadata = self.get_metadata_block();
+        let (this_idx, header) = self.index_to_skip_list_header(index);
+        let prev_idx = header.prev;
+        let next_idx = header.next;
+
+        header.id_tag = 0; // Mark as free
+        // Update known free index if necessary
+        if this_idx < metadata.lowest_known_free_index {
+            metadata.lowest_known_free_index = this_idx;
+        }
+
+        if next_idx != BUFFER_END {
+            let (_, next) = self.index_to_skip_list_header(SkipListStart(next_idx));
+            if next.id_tag == 0 {
+                // Merge with the next item, by encompassing it
+                let next_next_idx = next.next;
+                header.next = next_next_idx;
+                // Update the prev of the next_next_idx
+                if next_next_idx != BUFFER_END {
+                    let (_, next_next) = self.index_to_skip_list_header(SkipListStart(next_next_idx));
+                    next_next.prev = this_idx;
+                }
+            }
+        }
+        if prev_idx != BUFFER_END {
+            let (_, prev) = self.index_to_skip_list_header(SkipListStart(prev_idx));
+            if prev.id_tag == 0 {
+                // Merge by swallowing this item with the previous item
+                let next_idx = header.next;
+                prev.next = next_idx;
+                // Update the prev of the following item
+                if next_idx != BUFFER_END {
+                    let (_, next) = self.index_to_skip_list_header(SkipListStart(next_idx));
+                    next.prev = prev_idx;
+                }
+            }
         }
     }
 
-    fn header_for<'a>(&'a self, i: PageIndex) -> &'a mut SlotHeader {
+    /// Get the metadata block, which always lives in the last page of the array
+    fn get_metadata_block<'a>(&'a self) -> &'a mut Metadata {
+        let metadata_index = self.buffer_size - PAGE_SIZE + *HEADER_SIZE;
         unsafe {
-            let ptr = self.buffer.clone()
-                .offset((i * self.slot_size) as isize);
+            mem::transmute(self.byte_index_to_live_ptr(metadata_index))
+        }
+    }
+
+    /// Get the byte_slice corresponding to an index
+    fn index_to_byte_slice<'a>(&'a self, index: IndexType) -> &'a [u8] {
+        let size = self.index_to_arc_inner(index).size;
+        let offset = self.index_to_data_offset(index);
+        unsafe {
+            slice::from_raw_parts(self.buffer.offset(offset as isize), size)
+        }
+    }
+
+    /// Get the byte_slice corresponding to an index
+    fn index_to_byte_slice_mut<'a>(&'a self, index: IndexType) -> &'a mut [u8] {
+        let size = self.index_to_arc_inner(index).size;
+        let offset = self.index_to_data_offset(index);
+        unsafe {
+            slice::from_raw_parts_mut(self.buffer.offset(offset as isize), size)
+        }
+    }
+
+    /// Get the arc inner for a given index
+    fn index_to_arc_inner<'a>(&'a self, index: IndexType) -> &'a mut ArcByteSliceInner {
+        let offset = self.index_to_arc_offset(index);
+        unsafe {
+            let ptr = self.byte_index_to_live_ptr(offset);
             mem::transmute(ptr)
         }
     }
 
-    fn raw_contents_for<'a>(&'a self, i: PageIndex) -> *mut u8 {
+    /// Get the arc inner for a given arc outer
+    fn arc_to_arc_inner_index<'a>(&'a self, arc: &ArcByteSlice) -> IndexType {
         unsafe {
-            self.buffer.clone()
-                .offset((i * self.slot_size) as isize)
-                .offset(self.header_size as isize)
+            let ptr: *mut u8 = mem::transmute(arc._ptr);
+            ArcByteSliceStart(self.live_ptr_to_byte_index(ptr))
         }
     }
 
-    fn zero_page(&self, page_index: PageIndex) {
-        unsafe {
-            let mut i = self.raw_contents_for(page_index);
-            let end = i.clone().offset(mem::size_of::<Page>() as isize);
-            while i != end {
-                *i = 0u8;
-                i = i.offset(1);
-            }
+    /// Overhead must already be factored into size
+    fn next_free_block_larger_than<'a>(&'a self, size: usize, start_index: IndexType) -> (usize, &'a mut SkipListEntry) {
+        let (idx, mut entry) = self.index_to_skip_list_header(start_index);
+        if entry.id_tag == 0
+           && (entry.next - idx) >= size {
+            (idx, entry)
+        } else if entry.next != BUFFER_END {
+            self.next_free_block_larger_than(size, SkipListStart(entry.next))
+        } else {
+            (BUFFER_END, entry)
         }
     }
 
-    /// Returns the index of the page containing the given pointer
-    /// panics if given a pointer outside of the buffer
-    unsafe fn calc_page_index(&self, obj: *const u8) -> usize {
-        let obj_addr = obj as usize;
+    fn live_ptr_to_arc(&self, ptr: *const u8) -> Result<ArcByteSlice, &'static str> {
+        let index = DataStart(self.live_ptr_to_byte_index(ptr));
+        let inner = self.index_to_arc_inner(index);
+        Ok(ArcByteSlice::new(inner, self))
+    }
+
+    fn live_ptr_to_byte_index(&self, ptr: *const u8) -> usize {
+        let obj_addr = ptr as usize;
         let buf_addr = self.buffer as usize;
-
         if obj_addr < buf_addr {
-            panic!("calc_page_index called with address below start of buffer!");
+            panic!("live_ptr_to_byte_index called with address below start of buffer!");
         }
         let offset = obj_addr - buf_addr;
         if offset > self.buffer_size {
-            panic!("calc_page_index called with address past end of buffer!");
+            panic!("live_ptr_to_byte_index called with address past end of buffer!");
         }
-        offset / self.slot_size
+        // println!("Converted live address {} to offset {}", obj_addr, offset);
+        offset
     }
-}
 
-impl Index<PageIndex> for Pool {
-    type Output = Page;
+    unsafe fn byte_index_to_live_ptr(&self, byte_index: usize) -> *mut u8 {
+        let ptr = self.buffer.offset(byte_index as isize);
+        // println!("Converted offset {} to live address {:?}", byte_index, ptr);
+        ptr
+    }
 
-    fn index<'a>(&'a self, i: usize) -> &'a Page {
+    fn index_to_data_offset(&self, index: IndexType) -> usize {
+        match index {
+            ArcByteSliceStart(i) => i + *ARC_INNER_SIZE,
+            DataStart(i) => i,
+            SkipListStart(i) => i + *OVERHEAD,
+        }
+    }
+
+    fn index_to_arc_offset(&self, index: IndexType) -> usize {
+        match index {
+            ArcByteSliceStart(i) => i,
+            DataStart(i) => i - *ARC_INNER_SIZE,
+            SkipListStart(i) => i + *HEADER_SIZE,
+        }
+    }
+
+    /// Find the skip list entry that precedes the given index's data
+    fn index_to_skip_list_header<'a>(&'a self, index: IndexType) -> (usize, &'a mut SkipListEntry) {
+        let offset = match index {
+            ArcByteSliceStart(i) => i - *HEADER_SIZE,
+            DataStart(i) => i - *OVERHEAD,
+            SkipListStart(i) => i,
+        };
         unsafe {
-            let ptr = self.buffer.clone()
-                .offset((i * self.slot_size) as isize)
-                .offset(self.header_size as isize);
-            mem::transmute(ptr)
+            (offset, mem::transmute(self.buffer.offset(offset as isize)))
         }
     }
-}
 
-impl IndexMut<PageIndex> for Pool {
-    fn index_mut<'a>(&'a mut self, i: usize) -> &'a mut Page {
-        unsafe {
-            let ptr = self.buffer.clone()
-                .offset((i * self.slot_size) as isize)
-                .offset(self.header_size as isize);
-            mem::transmute(ptr)
+    /// Priviledged, should not be called outside allocator package
+    pub fn _inner_offset(&self, arc: &ArcByteSlice) -> usize {
+        let inner_index = self.arc_to_arc_inner_index(arc);
+        self.index_to_arc_offset(inner_index)
+    }
+
+    /// Priviledged, should not be called outside allocator package
+    pub fn _get_id_tag(&self, arc: &ArcByteSlice) -> usize {
+        let inner_index = self.arc_to_arc_inner_index(arc);
+        let (_, header) = self.index_to_skip_list_header(inner_index);
+        header.id_tag
+    }
+
+    fn make_skip_entry(&self, index: IndexType, prev: usize, next: usize, is_free: bool) {
+        let (_, entry) = self.index_to_skip_list_header(index);
+        entry.prev = prev;
+        entry.next = next;
+        entry.id_tag = if is_free {
+            0
+        } else {
+            self.get_metadata_block().next_id_tag.fetch_add(1, SeqCst)
+        };
+    }
+
+    fn get_debug_blocks<'a>(&'a self) -> Vec<_B> {
+        let mut ret: Vec<_B> = Vec::new();
+        let mut next_index: usize = 0;
+        loop {
+            let (idx, entry) = self.index_to_skip_list_header(SkipListStart(next_index));
+            next_index = entry.next;
+            let prev_index = entry.prev;
+            if next_index == BUFFER_END {
+                break
+            }
+            ret.push(_B {
+                start: idx,
+                capacity: next_index - idx - *OVERHEAD,
+                next: next_index,
+                prev: prev_index,
+                is_free: entry.id_tag == 0,
+            });
         }
+        ret
     }
 }
 
-/// Tests
-#[test]
-fn release_frees() {
-       let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
-       let p = Pool::new(&mut buf[..]);
-
-       // Use claim_free_index so that the Arc doesn't drop
-       // the reference immediately
-       assert!(p.claim_free_index().is_ok());
-       assert!(p.claim_free_index().is_ok());
-
-       assert_eq!(2, p.live_count());
-
-       p.release(0);
-       assert_eq!(1, p.live_count());
-       assert_eq!(1, p.free_list.borrow().len());
-       assert_eq!(0, *p.free_list.borrow().front().unwrap());
-
-       p.release(1);
-       assert_eq!(0, p.live_count());
-       assert_eq!(2, p.free_list.borrow().len());
+/// Align to the next 8 bytes
+fn byte_align(size: usize) -> usize {
+    let spill = if size % 8 == 0 {0} else {1};
+    8 * (size/8 + spill)
 }
 
-#[test]
-fn alloc_after_free_recycles() {
-       let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
-       let p = Pool::new(&mut buf[..]);
-       assert!(p.claim_free_index().is_ok());
-       assert_eq!(1, p.live_count());
-       assert_eq!(1, p.tail.load(Ordering::Relaxed));
-
-       p.release(0);
-       assert_eq!(0, p.live_count());
-       assert_eq!(1, p.free_list.borrow().len());
-
-       assert!(p.claim_free_index().is_ok());
-       assert_eq!(1, p.tail.load(Ordering::Relaxed)); // Tail shouldn't move
-       assert_eq!(1, p.live_count());
-       assert_eq!(0, p.free_list.borrow().len());
+#[derive(Debug)]
+struct _B {
+    start: usize,
+    capacity: usize,
+    next: usize,
+    prev: usize,
+    is_free: bool,
 }
 
-#[test]
-fn construction() {
-    let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
-    let p = Pool::new(&mut buf[..]);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    assert_eq!(5*0x1000, p.buffer_size);
-    assert_eq!(mem::size_of::<usize>(), p.header_size);
-
-    let expected_size = mem::size_of::<usize>() + mem::size_of::<Page>();
-    assert_eq!(expected_size, p.slot_size);
-    assert_eq!(5*0x1000/expected_size, p.capacity); // expected_size should be 8+4096=4104
-    assert_eq!(5, p.capacity);
-}
-
-#[test]
-fn free_list_alloc_works() {
-    let mut buf: [u8; 5*0x1000] = [0; 5*0x1000];
-    let mut p = Pool::new(&mut buf[..]);
-    let forty_two = [42u8; PAGE_SIZE];
-    {
-        let int1 = p.alloc().unwrap();
-        p[int1] = forty_two;
-        // Check payload
-        assert_eq!(forty_two[..], buf[8..4096]);
-        // Check ref_count
-        assert_eq!([1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8][..], buf[0..8]);
-        assert_eq!(1, p.live_count());
+    #[test]
+    #[should_panic(expected="OOM")]
+    fn test_oom() {
+        let mut buf: [u8; 0x2000] = [0; 0x2000];
+        let p = Pool::new(&mut buf[..]);
+        p.malloc(&[42; 0x2000][..]).unwrap();
     }
-}
 
-#[test]
-fn check_oom_error() {
-    let mut buf: [u8; 1] = [0; 1];
-    let p = Pool::new(&mut buf[..]);
-    assert_eq!(Err("OOM"), p.alloc());
-}
+    #[test]
+    fn test_printing_empty() {
+        let mut buf: [u8; 0x2000] = [0; 0x2000];
+        let p = Pool::new(&mut buf[..]);
+        assert_eq!(
+            "Pool { buffer_size: 8192, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(2) }, \
+                blocks: [\
+                _B { start: 0, capacity: 4048, next: 4096, prev: 18446744073709551615, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
+    }
 
-#[test]
-fn multiple_allocations_work() {
-    let mut buf: [u8; 12*0x1000] = [0; 12*0x1000];
-    let p = Pool::new(&mut buf[..]);
-    for _ in 0..10 {
-        let _ = p.alloc().unwrap();
-   }
-   assert_eq!(10, p.live_count());
-   let expected_ref_count = [1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8];
-   for i in 0..10 {
-       let start = 4096*i;
-       // Check ref_count
-       assert_eq!(expected_ref_count[..], buf[start..start+8]);
+    #[test]
+    fn test_small_alloc_free() {
+        let mut buf: [u8; 0x4000] = [0; 0x4000];
+        let p = Pool::new(&mut buf[..]);
+        let data = [0x1, 0x2, 0x3, 0x4];
+
+        let arc_ts1 = p.malloc(&data[..]).unwrap();
+
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 56, next_id_tag: AtomicUsize(3) }, \
+                blocks: [\
+                    _B { start: 0, capacity: 8, next: 56, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 56, capacity: 12184, next: 12288, prev: 0, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
+
+        assert_eq!([0x1, 0x2, 0x3, 0x4], arc_ts1[0..4]);
+
+        let arc_ts2 = p.malloc(&data[..]).unwrap();
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 112, next_id_tag: AtomicUsize(4) }, \
+                blocks: [\
+                    _B { start: 0, capacity: 8, next: 56, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 56, capacity: 8, next: 112, prev: 0, is_free: false }, \
+                    _B { start: 112, capacity: 12128, next: 12288, prev: 56, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
+
+        p.free(&arc_ts1);
+
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(4) }, \
+                blocks: [\
+                    _B { start: 0, capacity: 8, next: 56, prev: 18446744073709551615, is_free: true }, \
+                    _B { start: 56, capacity: 8, next: 112, prev: 0, is_free: false }, \
+                    _B { start: 112, capacity: 12128, next: 12288, prev: 56, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
+
+        p.free(&arc_ts2);
+
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 0, next_id_tag: AtomicUsize(4) }, \
+                blocks: [\
+                    _B { start: 0, capacity: 12240, next: 12288, prev: 18446744073709551615, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
+    }
+
+    #[test]
+    fn test_large_alloc() {
+        let mut buf: [u8; 0x4000] = [0; 0x4000];
+        let p = Pool::new(&mut buf[..]);
+
+        // Take up > 1 page
+        let arc_ts1 = p.malloc(&[42u8; 0x2000][..]).unwrap();
+
+        assert_eq!(
+            "Pool { buffer_size: 16384, \
+                metadata: Metadata { lowest_known_free_index: 8240, next_id_tag: AtomicUsize(3) }, \
+                blocks: [\
+                    _B { start: 0, capacity: 8192, next: 8240, prev: 18446744073709551615, is_free: false }, \
+                    _B { start: 8240, capacity: 4000, next: 12288, prev: 0, is_free: true }\
+                ] }",
+            format!("{:?}", p)
+        );
     }
 }
