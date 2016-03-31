@@ -124,6 +124,40 @@ impl Node {
             mid_key: try!(self.keys[midpoint].clone_to_arc_byte_slice(pool))
         })
     }
+
+    /// Joins two underfull nodes, immutably, returning the new merged node
+    pub fn join<'a>(bottom: &'a Node, top: &'a Node, tx_id: usize, pool: &'a Pool)
+        -> Result<ArcByteSlice, &'static str> {
+        assert!(bottom.num_keys + top.num_keys < B,
+            "Join called on nodes that have too many keys");
+        assert!(bottom.num_children + top.num_children < B,
+            "Join called on nodes that have too many children");
+        assert_eq!(bottom.node_type, top.node_type);
+
+        let new_arc = try!(pool.make_new::<Node>());
+        { // Borrow checker
+            let new_node = new_arc.deref_as_mut::<Node>();
+            new_node.init(tx_id, bottom.node_type.clone());
+
+            // Copy over keys/values
+            for i in 0..bottom.num_keys {
+                new_node.keys[i] = try!(bottom.keys[i].clone(pool));
+            }
+            for i in 0..top.num_keys {
+                new_node.keys[i+bottom.num_keys] = try!(top.keys[i].clone(pool));
+            }
+            for i in 0..bottom.num_children {
+                new_node.children[i] = try!(bottom.children[i].clone(pool));
+            }
+            for i in 0..top.num_children {
+                new_node.children[i+bottom.num_children] = try!(top.children[i].clone(pool));
+            }
+            // Copy over metadata
+            new_node.num_keys = bottom.num_keys + top.num_keys;
+            new_node.num_children = bottom.num_children + top.num_children;
+        }
+        Ok(new_arc)
+    }
 }
 
 /// Private interface
@@ -356,6 +390,48 @@ mod tests {
 
     fn get_ref_count(persist: &PersistedArcByteSlice, pool: &Pool) -> usize {
         persist.clone_to_arc_byte_slice(pool).unwrap().get_ref_count() - 1
+    }
+
+    #[test]
+    fn test_leaf_node_joins() {
+        let mut buf = [0u8; 0x8000];
+        let pool = Pool::new(&mut buf);
+
+        let n_arc = pool.make_new::<Node>().unwrap();
+        let n = n_arc.deref_as_mut::<Node>();
+        n.init(0, Leaf);
+
+        let hello = String::from("hello").into_bytes();
+        let world = String::from("world").into_bytes();
+        let foo = String::from("foo").into_bytes();
+        let bar = String::from("bar").into_bytes();
+        let rust = String::from("rust").into_bytes();
+        let iscool = String::from("is cool").into_bytes();
+
+        let n = n.leaf_node_insert_non_full(1, &hello[..], &world[..], &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(2, &rust[..], &iscool[..], &pool).unwrap();
+        let n = n.deref_as::<Node>().leaf_node_insert_non_full(3, &foo[..], &bar[..], &pool).unwrap();
+
+
+        let split = n.deref_as::<Node>().split(4, &pool).unwrap();
+
+        let join = Node::join(
+            split.bottom_half.deref_as::<Node>(),
+            split.top_half.deref_as::<Node>(),
+            5,
+            &pool
+        )
+        .unwrap();
+
+        assert_eq!(
+            "Leaf { tx_id: 5, \
+                keys: \"foo, hello, rust\", \
+                children: \"bar, world, is cool\" }",
+            format!("{:?}", DebuggableNode {
+                node: join.deref_as::<Node>(),
+                pool: &pool,
+            })
+        );
     }
 
     #[test]
