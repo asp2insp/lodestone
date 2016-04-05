@@ -44,6 +44,11 @@ pub struct Node {
     children: [PersistedArcByteSlice; B],
 }
 
+pub enum InsertionResult {
+    HadRoom(ArcByteSlice),
+    NoRoom(Split),
+}
+
 pub struct Split {
     bottom_half: ArcByteSlice,
     top_half: ArcByteSlice,
@@ -222,33 +227,134 @@ impl Node {
     }
 }
 
+/// Internal Node impl
+impl Node {
+    fn internal_node_insert(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool)
+        -> Result<InsertionResult, &'static str> {
+        debug_assert!(NodeType::Internal == self.node_type);
+        let (_, i) = self.index_or_insertion_of(key, pool);
+        let child_arc = try!(self.children[i].clone_to_arc_byte_slice(pool));
+        let child_node = child_arc.deref_as::<Node>();
+        let child_result = match child_node.node_type {
+            NodeType::Leaf => try!(child_node.leaf_node_insert_or_set(tx_id, key, value, pool)),
+            NodeType::Internal => try!(child_node.internal_node_insert(tx_id, key, value, pool)),
+            _ => panic!("Internal node points to a Root. Not Okay."),
+        };
+
+        match child_result {
+            InsertionResult::HadRoom(ref new_child) => {
+                let new_internal = try!(self.internal_node_set(tx_id, i, new_child, pool));
+                Ok(InsertionResult::HadRoom(new_internal))
+            },
+            InsertionResult::NoRoom(ref split) => {
+                let node_arc = try!(self.clone(pool));
+                { // Borrow checker
+                    let node = node_arc.deref_as_mut::<Node>();
+                    node.tx_id = tx_id;
+                    node.num_keys += 1;
+                    insert_into(&mut node.keys, node.num_keys, &split.mid_key, i, pool);
+                    node.children[i] = split.bottom_half.clone_to_persisted();
+                    node.num_children += 1;
+                    insert_into(&mut node.children, node.num_children, &split.top_half, i+1, pool);
+                }
+                let node = node_arc.deref_as::<Node>();
+                if node.num_children == B {
+                    let split = try!(node.split(tx_id, pool));
+                    Ok(InsertionResult::NoRoom(split))
+                } else {
+                    Ok(InsertionResult::HadRoom(node_arc))
+                }
+            },
+        }
+    }
+
+    fn internal_node_set(&self, tx_id: usize, index: usize, value: &ArcByteSlice, pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+        debug_assert!(NodeType::Internal == self.node_type);
+        let node_arc = try!(self.clone(pool));
+        { // Borrow checker
+            let node = node_arc.deref_as_mut::<Node>();
+            node.tx_id = tx_id;
+            node.children[index] = value.clone_to_persisted();
+        }
+        Ok(node_arc)
+    }
+
+    fn internal_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
+        debug_assert!(NodeType::Internal == self.node_type);
+        let (_, i) = self.index_or_insertion_of(key, pool);
+        let child_arc = try!(self.children[i].clone_to_arc_byte_slice(pool));
+        let child_node = child_arc.deref_as::<Node>();
+        match child_node.node_type {
+            NodeType::Leaf => child_node.leaf_node_contains_key(key, pool),
+            NodeType::Internal => child_node.internal_node_contains_key(key, pool),
+            _ => panic!("Internal node points to a Root. Not Okay."),
+        }
+    }
+}
+
 /// Leaf Node impl
 impl Node {
     /// Check to see if the node contains the given key
     pub fn leaf_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
-        assert_eq!(NodeType::Leaf, self.node_type);
+        debug_assert!(NodeType::Leaf == self.node_type);
         self.index_or_insertion_of(key, pool).0
     }
 
     /// Return an arc to the value associated with the given key
     /// or None if the key is not contained within this node
-    pub fn value_for_key(&self, key: &[u8], pool: &Pool) -> Option<ArcByteSlice> {
+    pub fn leaf_node_value_for_key(&self, key: &[u8], pool: &Pool) -> Option<ArcByteSlice> {
+        debug_assert!(NodeType::Leaf == self.node_type);
         let (found, idx) = self.index_or_insertion_of(key, pool);
         if found {
-            Some(
-                recover_but_panic_in_debug!(
-                    self.children[idx].clone_to_arc_byte_slice(pool),
-                    None
-                )
-            )
+            Some(recover_but_panic_in_debug!(
+                self.children[idx].clone_to_arc_byte_slice(pool),
+                None
+            ))
         } else {
             None
         }
     }
 
+    /// Insert in an append only/immutable fashion. Will either return
+    /// itself, if there has not been a split, or the two halves of the
+    /// split along with the middle key
+    fn leaf_node_insert_or_set(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<InsertionResult, &'static str> {
+        debug_assert!(NodeType::Leaf == self.node_type);
+        let (found, _) = self.index_or_insertion_of(key, pool);
+        if found {
+            let replace_result = try!(self.leaf_node_set(tx_id, key, value, pool));
+            Ok(InsertionResult::HadRoom(replace_result))
+        } else {
+            let insert_result = try!(self.leaf_node_insert_non_full(tx_id, key, value, pool));
+            if insert_result.deref_as::<Node>().num_children == B {
+                let split = try!(insert_result.deref_as::<Node>().split(tx_id, pool));
+                Ok(InsertionResult::NoRoom(split))
+            } else {
+                Ok(InsertionResult::HadRoom(insert_result))
+            }
+        }
+    }
+
+    /// Replace the value for the given key with the given value. The key MUST already exist
+    fn leaf_node_set(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+        debug_assert!(NodeType::Leaf == self.node_type);
+        let val_arc = try!(pool.malloc(value));
+        let node_arc = try!(self.clone(pool));
+        { // Borrow checker
+            let node = node_arc.deref_as_mut::<Node>();
+            node.tx_id = tx_id;
+            let (found, index) = node.index_or_insertion_of(key, pool);
+            if !found {
+                return Err("Key does not exist");
+            }
+            node.children[index] = val_arc.clone_to_persisted();
+        }
+        Ok(node_arc)
+    }
+
     /// Insert in an append only/immutable fashion
-    fn leaf_node_insert_non_full<'a>(&'a self, tx_id: usize, key: &[u8], value: &[u8], pool: &'a Pool) -> Result<ArcByteSlice, &'static str> {
-        assert_eq!(NodeType::Leaf, self.node_type);
+    fn leaf_node_insert_non_full(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+        debug_assert!(NodeType::Leaf == self.node_type);
         let key_arc = try!(pool.malloc(key));
         let val_arc = try!(pool.malloc(value));
         let node_arc = try!(self.clone(pool));
@@ -273,7 +379,7 @@ impl Node {
     /// Remove in an append-only/immutable fashion.
     /// Precondition: key must exist. Panics if key does not exist
     fn leaf_node_remove<'a>(&'a self, tx_id: usize, key: &[u8], pool:&'a Pool) -> Result<ArcByteSlice, &'static str> {
-        assert_eq!(NodeType::Leaf, self.node_type);
+        debug_assert!(NodeType::Leaf == self.node_type);
         let (found, index) = self.index_or_insertion_of(key, pool);
         if !found {
             return Err("This node does not contain the given key");
@@ -615,7 +721,6 @@ mod tests {
             })
         );
     }
-
 
     #[test]
     fn test_size_constraints() {
