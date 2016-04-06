@@ -262,7 +262,7 @@ impl Node {
                     let split = try!(node.split(tx_id, pool));
                     Ok(InsertionResult::NoRoom(split))
                 } else {
-                    Ok(InsertionResult::HadRoom(node_arc))
+                    Ok(InsertionResult::HadRoom(node_arc.clone()))
                 }
             },
         }
@@ -282,7 +282,10 @@ impl Node {
     fn internal_node_contains_key(&self, key: &[u8], pool: &Pool) -> bool {
         debug_assert!(NodeType::Internal == self.node_type);
         let (_, i) = self.index_or_insertion_of(key, pool);
-        let child_arc = try!(self.children[i].clone_to_arc_byte_slice(pool));
+        let child_arc = recover_but_panic_in_debug!(
+            self.children[i].clone_to_arc_byte_slice(pool),
+            false
+        );
         let child_node = child_arc.deref_as::<Node>();
         match child_node.node_type {
             NodeType::Leaf => child_node.leaf_node_contains_key(key, pool),
@@ -490,9 +493,12 @@ impl <'a> fmt::Debug for DebuggableNode<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::str;
     use allocator::*;
     use super::*;
+    use super::super::*;
     use super::NodeType::*;
+    use super::InsertionResult::*;
 
     lazy_static! {
         static ref HELLO: Vec<u8> = String::from("hello").into_bytes();
@@ -507,6 +513,59 @@ mod tests {
 
     fn get_ref_count(persist: &PersistedArcByteSlice, pool: &Pool) -> usize {
         persist.clone_to_arc_byte_slice(pool).unwrap().get_ref_count() - 1
+    }
+
+    #[test]
+    fn test_leaf_node_insert_split() {
+        let mut buf = [0u8; 0x8000];
+        let pool = Pool::new(&mut buf);
+
+        let mut n_arc = pool.make_new::<Node>().unwrap();
+        n_arc.deref_as_mut::<Node>().init(0, Leaf);
+
+        for i in 0..(B-1) {
+            let key: Vec<u8> = format!("{} key", i).into_bytes();
+            let value: Vec<u8> = format!("{} value", i).into_bytes();
+            match n_arc.deref_as::<Node>()
+                .leaf_node_insert_or_set(i, &key[..], &value[..], &pool)
+                .unwrap() {
+                HadRoom(arc) => n_arc = arc,
+                NoRoom(_) => panic!("Ran out of room too soon {}/{}", i, B),
+            }
+        }
+
+        let key: Vec<u8> = String::from("The Straw That").into_bytes();
+        let value: Vec<u8> = String::from("Broke The Camel's Back").into_bytes();
+        let should_be_split = n_arc.deref_as::<Node>().leaf_node_insert_or_set(
+            B,
+            &key[..],
+            &value[..],
+            &pool
+        ).unwrap();
+        match should_be_split {
+            HadRoom(arc) => {
+                panic!("Did not split when it should have! {}/{}", arc.deref_as::<Node>().num_children, B);
+            },
+            NoRoom(split) => {
+                let bottom_node = split.bottom_half.deref_as::<Node>();
+                let top_node = split.top_half.deref_as::<Node>();
+
+                assert_eq!(50, bottom_node.num_children);
+                assert_eq!(50, top_node.num_children);
+
+                println!("BOTTOM: {:?}", DebuggableNode {
+                    node: bottom_node,
+                    pool: &pool,
+                });
+                println!("TOP: {:?}", DebuggableNode {
+                    node: top_node,
+                    pool: &pool,
+                });
+
+                // "55 key" is the lexicographic middle
+                assert_eq!("55 key", str::from_utf8(&*split.mid_key).unwrap());
+            },
+        };
     }
 
     #[test]
@@ -585,9 +644,9 @@ mod tests {
 
         assert!(top.leaf_node_contains_key(&FOO, &pool));
 
-        assert_eq!(*BAR, &*top.value_for_key(&FOO, &pool).unwrap());
-        assert_eq!(*WORLD, &*top.value_for_key(&HELLO, &pool).unwrap());
-        assert_eq!(*BLUEBERRY, &*bottom.value_for_key(&CHERRY, &pool).unwrap());
+        assert_eq!(*BAR, &*top.leaf_node_value_for_key(&FOO, &pool).unwrap());
+        assert_eq!(*WORLD, &*top.leaf_node_value_for_key(&HELLO, &pool).unwrap());
+        assert_eq!(*BLUEBERRY, &*bottom.leaf_node_value_for_key(&CHERRY, &pool).unwrap());
     }
 
     #[test]
