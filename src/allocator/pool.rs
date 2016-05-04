@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 
 use super::arc::*;
+use LodestoneError;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const BUFFER_END: usize = !0 as usize;
@@ -75,13 +76,13 @@ enum IndexType {
 
 /// Public interface
 impl Pool {
-    pub fn make_new<T>(&self) -> Result<ArcByteSlice, &'static str> {
+    pub fn make_new<T>(&self) -> Result<ArcByteSlice, LodestoneError> {
         let size = mem::size_of::<T>();
         let (_, inner) = try!(self.malloc_inner(size));
         Ok(ArcByteSlice::new(inner, self))
     }
 
-    pub fn clone<T>(&self, from: &T) -> Result<ArcByteSlice, &'static str> {
+    pub fn clone<T>(&self, from: &T) -> Result<ArcByteSlice, LodestoneError> {
         let dest = try!(self.make_new::<T>());
         let arc_index = self.arc_to_arc_inner_index(&dest);
         let dest_slice = self.index_to_byte_slice_mut(arc_index);
@@ -93,7 +94,7 @@ impl Pool {
         Ok(dest)
     }
 
-    pub fn malloc(&self, data: &[u8]) -> Result<ArcByteSlice, &'static str> {
+    pub fn malloc(&self, data: &[u8]) -> Result<ArcByteSlice, LodestoneError> {
         let size = data.len();
         let (idx, inner) = try!(self.malloc_inner(size));
         let dest = self.index_to_byte_slice_mut(idx);
@@ -123,28 +124,30 @@ impl Pool {
         mem::transmute(self.buffer.offset(offset as isize))
     }
 
-    pub fn clone_persisted_to_arc(&self, persisted: &PersistedArcByteSlice) -> Result<ArcByteSlice, &'static str> {
+    pub fn clone_persisted_to_arc(&self, persisted: &PersistedArcByteSlice) -> Result<ArcByteSlice, LodestoneError> {
         let index = ArcByteSliceStart(persisted.arc_inner_index);
         let (_, header) = self.index_to_skip_list_header(index);
         if header.id_tag == persisted.get_id_tag() {
             let inner = self.index_to_arc_inner(index);
             Ok(ArcByteSlice::new(inner, self))
         } else {
-            Err("Can't convert to Arc. Persisted reference is no longer valid.")
+            Err(LodestoneError::InvalidReference(
+                "Can't convert to Arc. Persisted reference is no longer valid."
+            ))
         }
     }
 }
 
 /// Private interface
 impl Pool {
-    fn malloc_inner<'a>(&'a self, size: usize) -> Result<(IndexType, &'a mut ArcByteSliceInner), &'static str> {
+    fn malloc_inner<'a>(&'a self, size: usize) -> Result<(IndexType, &'a mut ArcByteSliceInner), LodestoneError> {
         let chunked_size = byte_align(size) + *OVERHEAD;
         let metadata = self.get_metadata_block();
         // Try to claim a block
         let (free_block_index, entry) = self.next_free_block_larger_than(chunked_size,
             SkipListStart(metadata.lowest_known_free_index));
         if free_block_index == BUFFER_END {
-            return Err("OOM")
+            return Err(LodestoneError::OutOfMemory("malloc_inner"));
         }
         // Claim as non-free
         entry.id_tag = metadata.next_id_tag.fetch_add(1, SeqCst);
@@ -268,7 +271,7 @@ impl Pool {
         }
     }
 
-    fn live_ptr_to_arc(&self, ptr: *const u8) -> Result<ArcByteSlice, &'static str> {
+    fn live_ptr_to_arc(&self, ptr: *const u8) -> Result<ArcByteSlice, LodestoneError> {
         let index = DataStart(self.live_ptr_to_byte_index(ptr));
         let inner = self.index_to_arc_inner(index);
         Ok(ArcByteSlice::new(inner, self))
@@ -388,7 +391,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected="OOM")]
+    #[should_panic(expected="malloc_inner")]
     fn test_oom() {
         let mut buf: [u8; 0x2000] = [0; 0x2000];
         let p = Pool::new(&mut buf[..]);

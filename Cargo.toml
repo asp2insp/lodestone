@@ -5,3 +5,4 @@ version = "0.1.0"
 
 [dependencies]
 lazy_static = "0.1.*"
+error-type = "0.1.*"

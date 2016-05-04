@@ -2,6 +2,7 @@ use std::{cmp,fmt,str};
 use allocator::*;
 
 use super::*;
+use LodestoneError;
 
 macro_rules! recover_but_panic_in_debug {
     ($expr:expr, $default:expr) => ({
@@ -57,7 +58,7 @@ pub struct Split {
 
 /// Public interface
 impl Node {
-    pub fn clone(&self, pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+    pub fn clone(&self, pool: &Pool) -> Result<ArcByteSlice, LodestoneError> {
         let clone = try!(pool.clone(self));
         {
             let node = clone.deref_as_mut::<Node>();
@@ -90,7 +91,7 @@ impl Node {
     /// So mid_key = 2 = num_keys/2 so we get [0, 1] and [2, 3]
     /// mid_child = 2 = num_keys/2 so we get [0, 1] and [2, 3, 4]
     pub fn split<'a>(&'a self, tx_id: usize, pool: &'a Pool)
-        -> Result<Split, &'static str> {
+        -> Result<Split, LodestoneError> {
         assert!(self.num_keys > 0 && self.num_children > 0, "Split called on an empty node");
 
         let new_bottom_half_arc = try!(pool.make_new::<Node>());
@@ -132,7 +133,7 @@ impl Node {
 
     /// Joins two underfull nodes, immutably, returning the new merged node
     pub fn join<'a>(bottom: &'a Node, top: &'a Node, tx_id: usize, pool: &'a Pool)
-        -> Result<ArcByteSlice, &'static str> {
+        -> Result<ArcByteSlice, LodestoneError> {
         assert!(bottom.num_keys + top.num_keys < B,
             "Join called on nodes that have too many keys");
         assert!(bottom.num_children + top.num_children < B,
@@ -230,7 +231,7 @@ impl Node {
 /// Internal Node impl
 impl Node {
     fn internal_node_insert(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool)
-        -> Result<InsertionResult, &'static str> {
+        -> Result<InsertionResult, LodestoneError> {
         debug_assert!(NodeType::Internal == self.node_type);
         let (_, i) = self.index_or_insertion_of(key, pool);
         let child_arc = try!(self.children[i].clone_to_arc_byte_slice(pool));
@@ -268,7 +269,7 @@ impl Node {
         }
     }
 
-    fn internal_node_set(&self, tx_id: usize, index: usize, value: &ArcByteSlice, pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+    fn internal_node_set(&self, tx_id: usize, index: usize, value: &ArcByteSlice, pool: &Pool) -> Result<ArcByteSlice, LodestoneError> {
         debug_assert!(NodeType::Internal == self.node_type);
         let node_arc = try!(self.clone(pool));
         { // Borrow checker
@@ -321,7 +322,7 @@ impl Node {
     /// Insert in an append only/immutable fashion. Will either return
     /// itself, if there has not been a split, or the two halves of the
     /// split along with the middle key
-    fn leaf_node_insert_or_set(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<InsertionResult, &'static str> {
+    fn leaf_node_insert_or_set(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<InsertionResult, LodestoneError> {
         debug_assert!(NodeType::Leaf == self.node_type);
         let (found, _) = self.index_or_insertion_of(key, pool);
         if found {
@@ -339,7 +340,7 @@ impl Node {
     }
 
     /// Replace the value for the given key with the given value. The key MUST already exist
-    fn leaf_node_set(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+    fn leaf_node_set(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<ArcByteSlice, LodestoneError> {
         debug_assert!(NodeType::Leaf == self.node_type);
         let val_arc = try!(pool.malloc(value));
         let node_arc = try!(self.clone(pool));
@@ -348,7 +349,7 @@ impl Node {
             node.tx_id = tx_id;
             let (found, index) = node.index_or_insertion_of(key, pool);
             if !found {
-                return Err("Key does not exist");
+                return Err(LodestoneError::UserError("Key does not exist"));
             }
             node.children[index] = val_arc.clone_to_persisted();
         }
@@ -356,7 +357,7 @@ impl Node {
     }
 
     /// Insert in an append only/immutable fashion
-    fn leaf_node_insert_non_full(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+    fn leaf_node_insert_non_full(&self, tx_id: usize, key: &[u8], value: &[u8], pool: &Pool) -> Result<ArcByteSlice, LodestoneError> {
         debug_assert!(NodeType::Leaf == self.node_type);
         let key_arc = try!(pool.malloc(key));
         let val_arc = try!(pool.malloc(value));
@@ -367,9 +368,9 @@ impl Node {
             node.tx_id = tx_id;
             let (found, index) = node.index_or_insertion_of(key, pool);
             if found {
-                return Err("Key already exists");
+                return Err(LodestoneError::UserError("Key already exists"));
             } else if node.num_children == B {
-                return Err("Node is already full");
+                return Err(LodestoneError::UserError("Node is already full"));
             }
             node.num_children += 1;
             insert_into(&mut node.children, node.num_children, &val_arc, index, pool);
@@ -381,11 +382,11 @@ impl Node {
 
     /// Remove in an append-only/immutable fashion.
     /// Precondition: key must exist. Panics if key does not exist
-    fn leaf_node_remove<'a>(&'a self, tx_id: usize, key: &[u8], pool:&'a Pool) -> Result<ArcByteSlice, &'static str> {
+    fn leaf_node_remove<'a>(&'a self, tx_id: usize, key: &[u8], pool:&'a Pool) -> Result<ArcByteSlice, LodestoneError> {
         debug_assert!(NodeType::Leaf == self.node_type);
         let (found, index) = self.index_or_insertion_of(key, pool);
         if !found {
-            return Err("This node does not contain the given key");
+            return Err(LodestoneError::UserError("This node does not contain the given key"));
         }
         let arc = try!(pool.make_new::<Node>());
         { // Borrow checker

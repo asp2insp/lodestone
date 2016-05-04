@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering::{Acquire, Release, SeqCst, Relaxed};
 use std::ops::Deref;
 
 use super::pool::*;
+use LodestoneError;
 
 lazy_static! {
     pub static ref ARC_INNER_SIZE: usize = mem::size_of::<ArcByteSliceInner>();
@@ -132,7 +133,7 @@ pub struct PersistedArcByteSlice {
 }
 
 impl PersistedArcByteSlice {
-    pub fn clone_to_arc_byte_slice(&self, pool: &Pool) -> Result<ArcByteSlice, &'static str> {
+    pub fn clone_to_arc_byte_slice(&self, pool: &Pool) -> Result<ArcByteSlice, LodestoneError> {
         pool.clone_persisted_to_arc(self)
     }
 
@@ -140,7 +141,7 @@ impl PersistedArcByteSlice {
         self.id_tag
     }
 
-    pub fn clone(&self, pool: &Pool) -> Result<PersistedArcByteSlice, &'static str> {
+    pub fn clone(&self, pool: &Pool) -> Result<PersistedArcByteSlice, LodestoneError> {
         try!(self.retain(pool));
         Ok(PersistedArcByteSlice {
             arc_inner_index: self.arc_inner_index,
@@ -148,13 +149,13 @@ impl PersistedArcByteSlice {
         })
     }
 
-    pub fn retain(&self, pool: &Pool) -> Result<(), &'static str> {
+    pub fn retain(&self, pool: &Pool) -> Result<(), LodestoneError> {
         let arc = try!(pool.clone_persisted_to_arc(self));
         arc.inner().strong.fetch_add(1, Acquire);
         Ok(())
     }
 
-    pub fn release(&mut self, pool: &Pool) -> Result<bool, &'static str> {
+    pub fn release(&mut self, pool: &Pool) -> Result<bool, LodestoneError> {
         let arc = try!(pool.clone_persisted_to_arc(self));
         let remaining_count = arc.inner().strong.fetch_sub(1, Release) - 1;
         self.id_tag = 0;
