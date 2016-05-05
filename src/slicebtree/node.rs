@@ -517,6 +517,50 @@ mod tests {
     }
 
     #[test]
+    fn test_internal_node_insert_with_leaf_split() {
+        let mut buf = [0u8; 0x8000];
+        let pool = Pool::new(&mut buf);
+
+        let mut child = pool.make_new::<Node>().unwrap();
+        child.deref_as_mut::<Node>().init(0, Leaf);
+        let mut center_arc = pool.make_new::<Node>().unwrap();
+        center_arc.deref_as_mut::<Node>().init(0, Internal);
+        {
+            let mut center = center_arc.deref_as_mut::<Node>();
+            center.num_keys = 0;
+            center.num_children = 1;
+            center.children[0] = child.clone_to_persisted();
+        }
+        for i in 0..B {
+            let key: Vec<u8> = format!("{} key", i).into_bytes();
+            let value: Vec<u8> = format!("{} value", i).into_bytes();
+            release_node(&mut center_arc.clone_to_persisted(), &pool);
+            match center_arc.deref_as::<Node>()
+                .internal_node_insert(i, &key[..], &value[..], &pool)
+                .unwrap() {
+                HadRoom(arc) => center_arc = arc,
+                NoRoom(_) => panic!("Ran out of room {}/{}", i, B),
+            }
+        }
+        {
+            let center = center_arc.deref_as::<Node>();
+            assert_eq!(2, center.num_children);
+            assert_eq!(1, center.num_keys);
+            let mid_key = center.keys[0].clone_to_arc_byte_slice(&pool).unwrap();
+            assert_eq!("", str::from_utf8(&*mid_key).unwrap());
+
+            let left_node_arc = center.children[0].clone_to_arc_byte_slice(&pool).unwrap();
+            let left_node = left_node_arc.deref_as::<Node>();
+            assert_eq!(B/2, left_node.num_keys);
+            assert_eq!(B/2, left_node.num_children);
+            let right_node_arc = center.children[1].clone_to_arc_byte_slice(&pool).unwrap();
+            let right_node = right_node_arc.deref_as::<Node>();
+            assert_eq!(B/2, right_node.num_keys);
+            assert_eq!(B/2, right_node.num_children);
+        }
+    }
+
+    #[test]
     fn test_leaf_node_insert_split() {
         let mut buf = [0u8; 0x8000];
         let pool = Pool::new(&mut buf);
